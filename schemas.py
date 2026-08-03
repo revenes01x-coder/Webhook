@@ -312,3 +312,14 @@ class ApiKeyResponse(BaseModel):
 
 class ApiKeyStatusResponse(BaseModel):
     has_api_key: bool
+
+# ---- สำหรับ GET /auth/me — เช็คสถานะ user แบบ read-only (terms/admin/api-key) ----
+class UserMeResponse(BaseModel):
+    email: str
+    is_verified: bool
+    terms_accepted: bool
+    is_admin: bool
+    has_api_key: bool
+
+    class Config:
+        from_attributes = True

@@ -13,6 +13,7 @@ from security import (
     create_password_reset_token,
     decode_password_reset_token,
     revoke_token,
+    get_current_user,
     oauth2_scheme,
 )
 from rate_limiter import check_rate_limit
@@ -31,11 +32,11 @@ REGISTER_PURPOSE = "register"
 PASSWORD_RESET_PURPOSE = "password_reset"
 
 
-def _create_and_send_otp(db: Session, user: models.User, purpose: str = REGISTER_PURPOSE) -> None:
+def _create_and_send_otp(db: Session, user: models.User, purpose: str = REGISTER_PURPOSE) -> models.OtpVerification:
     """สร้าง/เขียนทับ OTP ของ (user, purpose) นี้ แล้วส่งอีเมล
-    Upsert: มีแค่ 1 แถวต่อ (user_id, purpose) เสมอ — ขอ OTP ใหม่ = เขียนทับแถวเดิมทั้งหมด
-    (otp_hash, expires_at, attempt_count, is_used, created_at) ไม่ insert แถวใหม่ซ้อน
-    เลือก email template ตาม purpose — register กับ password_reset ใช้ถ้อยคำต่างกัน"""
+    ...
+    คืน otp_record กลับไปให้ caller เอา expires_at ไปส่งต่อให้ frontend นับถอยหลังได้แม่นยำ
+    (ใช้เวลาจริงจาก server ไม่ใช่ค่าคงที่ฝั่ง client)"""
 
     otp_record = (
         db.query(models.OtpVerification)
@@ -54,7 +55,7 @@ def _create_and_send_otp(db: Session, user: models.User, purpose: str = REGISTER
         otp_record.attempt_count = 0
         otp_record.is_used = False
         otp_record.expires_at = now + timedelta(minutes=OTP_EXPIRE_MINUTES)
-        otp_record.created_at = now  # อัปเดตทุกครั้ง ใช้เป็นฐานเช็ค cooldown
+        otp_record.created_at = now
     else:
         otp_record = models.OtpVerification(
             user_id=user.id,
@@ -68,13 +69,14 @@ def _create_and_send_otp(db: Session, user: models.User, purpose: str = REGISTER
         db.add(otp_record)
 
     db.commit()
+    db.refresh(otp_record)  # เอา id/expires_at ที่ commit แล้วกลับมาแน่นอน
 
-    # ส่งอีเมลหลัง commit สำเร็จแล้ว ถ้าส่งไม่ผ่านให้ throw ต่อให้ router จัดการ
-    # (OTP ถูกสร้าง/ทับไว้ใน DB แล้ว user ยังกด resend/forgot-password ใหม่ได้ตามปกติ)
     if purpose == PASSWORD_RESET_PURPOSE:
         send_password_reset_otp_email(user.email, otp_plain)
     else:
         send_otp_email(user.email, otp_plain)
+
+    return otp_record
 
 
 @router.post("/register")
@@ -100,15 +102,18 @@ def register_user(user: schemas.UserCreate, request: Request, db: Session = Depe
         raise HTTPException(status_code=400, detail="อีเมลนี้มีในระบบแล้ว")
 
     try:
-        _create_and_send_otp(db, new_user)
+        otp_record = _create_and_send_otp(db, new_user)
     except RuntimeError as e:
-        # user ถูกสร้างแล้วแต่ส่งอีเมลไม่สำเร็จ -> แจ้ง user ให้กด resend-otp เอง แทนที่จะ 500 เฉยๆ
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"สมัครสมาชิกสำเร็จ แต่{str(e)} กรุณากด 'ส่ง OTP อีกครั้ง'",
         )
 
-    return {"message": "สมัครสมาชิกสำเร็จ กรุณากรอก OTP ที่ส่งไปยังอีเมลของคุณเพื่อยืนยันตัวตน"}
+    return {
+        "message": "สมัครสมาชิกสำเร็จ กรุณากรอก OTP ที่ส่งไปยังอีเมลของคุณเพื่อยืนยันตัวตน",
+        "otp_expires_at": otp_record.expires_at,       # ใช้เวลานี้นับถอยหลังฝั่ง frontend
+        "otp_expires_in_seconds": OTP_EXPIRE_MINUTES * 60,
+    }
 
 
 @router.post("/verify-otp")
@@ -209,11 +214,15 @@ def resend_otp(payload: schemas.OtpResendRequest, db: Session = Depends(get_db))
             )
 
     try:
-        _create_and_send_otp(db, user)
+        otp_record = _create_and_send_otp(db, user)
     except RuntimeError as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
 
-    return {"message": "ส่ง OTP ใหม่ไปยังอีเมลของคุณแล้ว"}
+    return {
+        "message": "ส่ง OTP ใหม่ไปยังอีเมลของคุณแล้ว",
+        "otp_expires_at": otp_record.expires_at,
+        "otp_expires_in_seconds": OTP_EXPIRE_MINUTES * 60,
+    }
 
 
 @router.post("/login", response_model=schemas.Token)
@@ -288,11 +297,15 @@ def forgot_password(payload: schemas.ForgotPasswordRequest, db: Session = Depend
             )
 
     try:
-        _create_and_send_otp(db, user, purpose=PASSWORD_RESET_PURPOSE)
+        otp_record = _create_and_send_otp(db, user, purpose=PASSWORD_RESET_PURPOSE)
     except RuntimeError as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
 
-    return generic_message
+    return {
+        **generic_message,
+        "otp_expires_at": otp_record.expires_at,
+        "otp_expires_in_seconds": OTP_EXPIRE_MINUTES * 60,
+    }
 
 
 @router.post("/verify-reset-otp", response_model=schemas.ResetTokenResponse)
@@ -398,3 +411,20 @@ def logout(
     แม้จะยังไม่หมดอายุตามปกติ (ปกติ 15 นาที) ต้อง login ใหม่เพื่อขอ token ใบใหม่"""
     revoke_token(db, token)
     return {"message": "ออกจากระบบเรียบร้อยแล้ว"}
+
+@router.get("/me", response_model=schemas.UserMeResponse)
+def get_me(current_user: models.User = Depends(get_current_user)):
+    """
+    เช็คสถานะบัญชีตัวเองแบบ read-only — ใช้แทนการเดาจาก localStorage ฝั่ง frontend
+    (เช่น terms gate ไม่ต้องเด้ง modal ซ้ำถ้าเช็คจาก endpoint นี้แล้วว่า terms_accepted=True จริง
+    ข้ามเบราว์เซอร์/เครื่องก็ยังแม่นยำ เพราะอิงจาก DB ไม่ใช่ local storage)
+    ไม่มี dependency chain (ไม่ต้อง terms/access approved) เพราะจุดประสงค์คือใช้เช็ค "ก่อน" ตัดสินใจ
+    เปิด terms modal หรือไม่ ถ้าบังคับ require_terms_accepted ในนี้ด้วยจะ deadlock ตรรกะ
+    """
+    return schemas.UserMeResponse(
+        email=current_user.email,
+        is_verified=current_user.is_verified,
+        terms_accepted=current_user.terms_accepted,
+        is_admin=current_user.is_admin,
+        has_api_key=current_user.api_key_hash is not None,
+    )
