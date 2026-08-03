@@ -466,6 +466,23 @@ async def cleanup_old_plate_data():
     finally:
         db.close()
 
+async def cleanup_expired_revoked_tokens():
+    """ลบ record ใน revoked_tokens ที่ revoked_expires_at ผ่านไปแล้ว
+    (token หมดอายุไปเองตามธรรมชาติแล้ว ไม่มีประโยชน์ต้องเก็บ record ไว้เช็คต่อ)"""
+    db: Session = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        result = db.query(models.RevokedToken).filter(
+            models.RevokedToken.revoked_expires_at <= now,
+        ).delete(synchronize_session=False)
+        db.commit()
+        if result:
+            logging.info(f"ลบ revoked token ที่หมดอายุไปแล้ว {result} รายการ")
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Cleanup revoked tokens ทำงานผิดพลาด: {e}")
+    finally:
+        db.close()
 
 def start_scheduler():
     scheduler = AsyncIOScheduler()
@@ -474,5 +491,6 @@ def start_scheduler():
     scheduler.add_job(verify_pending_cameras, 'interval', minutes=2)
     scheduler.add_job(cleanup_unverified_users, 'interval', hours=1)
     scheduler.add_job(cleanup_old_plate_data, 'interval', hours=24)
+    scheduler.add_job(cleanup_expired_revoked_tokens, 'interval', hours=1)
     scheduler.start()
     return scheduler

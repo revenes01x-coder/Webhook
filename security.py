@@ -8,6 +8,7 @@ from database import get_db
 from config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, PASSWORD_RESET_TOKEN_EXPIRE_MINUTES
 from api_key_utils import hash_api_key
 import models
+import uuid 
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
@@ -28,7 +29,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     else:
         expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
 
-    to_encode.update({"exp": expire})
+    to_encode.update({"exp": expire, "jti": uuid.uuid4().hex})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
@@ -61,6 +62,37 @@ def decode_password_reset_token(token: str) -> str:
 
     return email
 
+def revoke_token(db: Session, token: str) -> None:
+    """ถอด jti + exp ออกจาก token แล้วบันทึกลง revoked_tokens
+    Idempotent: ถ้า jti นี้ถูก revoke ไปแล้ว (เช่นกด logout ซ้ำ) ไม่ error
+    token ที่ decode ไม่ผ่าน หรือไม่มี jti/exp (token เก่าก่อน deploy ฟีเจอร์นี้) จะเงียบๆ ไม่ทำอะไร
+    เพราะ token แบบนั้นใช้ไม่ได้อยู่แล้ว หรือปล่อยให้หมดอายุเองตามปกติ"""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return
+
+    jti = payload.get("jti")
+    exp = payload.get("exp")
+    if not jti or not exp:
+        return
+
+    existing = db.query(models.RevokedToken).filter(models.RevokedToken.jti == jti).first()
+    if existing:
+        return
+
+    db.add(models.RevokedToken(
+        jti=jti,
+        revoked_expires_at=datetime.fromtimestamp(exp, tz=timezone.utc),
+    ))
+    db.commit()
+
+
+def is_token_revoked(db: Session, jti: str | None) -> bool:
+    if not jti:
+        return False
+    return db.query(models.RevokedToken).filter(models.RevokedToken.jti == jti).first() is not None
+
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
@@ -71,9 +103,13 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
+        jti: str | None = payload.get("jti")
         if email is None:
             raise credentials_exception
     except JWTError:
+        raise credentials_exception
+
+    if is_token_revoked(db, jti):
         raise credentials_exception
 
     user = db.query(models.User).filter(models.User.email == email).first()

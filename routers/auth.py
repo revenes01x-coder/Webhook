@@ -12,6 +12,8 @@ from security import (
     create_access_token,
     create_password_reset_token,
     decode_password_reset_token,
+    revoke_token,
+    oauth2_scheme,
 )
 from rate_limiter import check_rate_limit
 from otp_utils import generate_otp, hash_otp, verify_otp
@@ -386,3 +388,13 @@ def reset_password(payload: schemas.ResetPasswordRequest, request: Request, db: 
     db.commit()
 
     return {"message": "ตั้งรหัสผ่านใหม่สำเร็จ กรุณาเข้าสู่ระบบด้วยรหัสผ่านใหม่"}
+
+@router.post("/logout")
+def logout(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
+    """Revoke access token ปัจจุบัน — หลัง logout token ใบนี้ใช้ต่อไม่ได้อีกทันที
+    แม้จะยังไม่หมดอายุตามปกติ (ปกติ 15 นาที) ต้อง login ใหม่เพื่อขอ token ใบใหม่"""
+    revoke_token(db, token)
+    return {"message": "ออกจากระบบเรียบร้อยแล้ว"}
