@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
+from typing import List
 import models, schemas
 from database import get_db
-from security import require_access_approved
+from security import require_access_approved, get_current_user
 from ssrf_guard import verify_webhook_url
 from rate_limiter import check_rate_limit
 
@@ -39,3 +40,22 @@ def add_webhook(
     db.refresh(new_endpoint)
 
     return new_endpoint
+
+
+@router.get("/my", response_model=List[schemas.WebhookResponse])
+def list_my_webhooks(
+    db: Session = Depends(get_db),
+    # แค่ดูข้อมูล ไม่มีสิทธิ์สร้าง/แก้ -> ใช้ get_current_user เฉยๆ พอ ตาม dependency rule ข้อ 7
+    current_user: models.User = Depends(get_current_user),
+):
+    """
+    List webhook endpoint ทั้งหมดของตัวเอง พร้อมสถานะ circuit breaker
+    (is_healthy, consecutive_dead_letters) — ใช้ทำ dashboard ดูภาพรวมว่า endpoint ไหน
+    กำลังมีปัญหา/ถูกตัดไฟอยู่บ้าง
+    """
+    return (
+        db.query(models.WebhookEndpoint)
+        .filter(models.WebhookEndpoint.user_id == current_user.id)
+        .order_by(models.WebhookEndpoint.id.desc())
+        .all()
+    )

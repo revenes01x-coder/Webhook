@@ -158,6 +158,8 @@ class WebhookResponse(BaseModel):
     id: int
     url: str
     is_active: bool
+    is_healthy: bool
+    consecutive_dead_letters: int
     created_at: datetime
 
     class Config:
