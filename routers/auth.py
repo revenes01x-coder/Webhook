@@ -1,0 +1,388 @@
+from fastapi import APIRouter, Depends, HTTPException, status, Request
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
+from fastapi.security import OAuth2PasswordRequestForm
+from datetime import datetime, timedelta, timezone
+
+import models, schemas
+from database import get_db
+from security import (
+    get_password_hash,
+    verify_password,
+    create_access_token,
+    create_password_reset_token,
+    decode_password_reset_token,
+)
+from rate_limiter import check_rate_limit
+from otp_utils import generate_otp, hash_otp, verify_otp
+from email_service import send_otp_email, send_password_reset_otp_email
+from config import (
+    OTP_EXPIRE_MINUTES,
+    OTP_MAX_ATTEMPTS,
+    OTP_RESEND_COOLDOWN_SECONDS,
+    OTP_RESEND_LIMIT_PER_HOUR,
+)
+
+router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+REGISTER_PURPOSE = "register"
+PASSWORD_RESET_PURPOSE = "password_reset"
+
+
+def _create_and_send_otp(db: Session, user: models.User, purpose: str = REGISTER_PURPOSE) -> None:
+    """สร้าง/เขียนทับ OTP ของ (user, purpose) นี้ แล้วส่งอีเมล
+    Upsert: มีแค่ 1 แถวต่อ (user_id, purpose) เสมอ — ขอ OTP ใหม่ = เขียนทับแถวเดิมทั้งหมด
+    (otp_hash, expires_at, attempt_count, is_used, created_at) ไม่ insert แถวใหม่ซ้อน
+    เลือก email template ตาม purpose — register กับ password_reset ใช้ถ้อยคำต่างกัน"""
+
+    otp_record = (
+        db.query(models.OtpVerification)
+        .filter(
+            models.OtpVerification.user_id == user.id,
+            models.OtpVerification.purpose == purpose,
+        )
+        .first()
+    )
+
+    otp_plain = generate_otp()
+    now = datetime.now(timezone.utc)
+
+    if otp_record:
+        otp_record.otp_hash = hash_otp(otp_plain)
+        otp_record.attempt_count = 0
+        otp_record.is_used = False
+        otp_record.expires_at = now + timedelta(minutes=OTP_EXPIRE_MINUTES)
+        otp_record.created_at = now  # อัปเดตทุกครั้ง ใช้เป็นฐานเช็ค cooldown
+    else:
+        otp_record = models.OtpVerification(
+            user_id=user.id,
+            purpose=purpose,
+            otp_hash=hash_otp(otp_plain),
+            attempt_count=0,
+            is_used=False,
+            expires_at=now + timedelta(minutes=OTP_EXPIRE_MINUTES),
+            created_at=now,
+        )
+        db.add(otp_record)
+
+    db.commit()
+
+    # ส่งอีเมลหลัง commit สำเร็จแล้ว ถ้าส่งไม่ผ่านให้ throw ต่อให้ router จัดการ
+    # (OTP ถูกสร้าง/ทับไว้ใน DB แล้ว user ยังกด resend/forgot-password ใหม่ได้ตามปกติ)
+    if purpose == PASSWORD_RESET_PURPOSE:
+        send_password_reset_otp_email(user.email, otp_plain)
+    else:
+        send_otp_email(user.email, otp_plain)
+
+
+@router.post("/register")
+def register_user(user: schemas.UserCreate, request: Request, db: Session = Depends(get_db)):
+    client_ip = request.client.host
+
+    # [Rate Limit]: สมัครได้ 5 ครั้ง / ชั่วโมง / IP
+    check_rate_limit(db, f"register_{client_ip}", "register", limit=5, window_minutes=60)
+
+    db_user = db.query(models.User).filter(models.User.email == user.email).first()
+    if db_user:
+        raise HTTPException(status_code=400, detail="อีเมลนี้มีในระบบแล้ว")
+
+    hashed_password = get_password_hash(user.password)
+    new_user = models.User(email=user.email, hashed_password=hashed_password, is_verified=False)
+    db.add(new_user)
+
+    try:
+        db.commit()
+        db.refresh(new_user)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="อีเมลนี้มีในระบบแล้ว")
+
+    try:
+        _create_and_send_otp(db, new_user)
+    except RuntimeError as e:
+        # user ถูกสร้างแล้วแต่ส่งอีเมลไม่สำเร็จ -> แจ้ง user ให้กด resend-otp เอง แทนที่จะ 500 เฉยๆ
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"สมัครสมาชิกสำเร็จ แต่{str(e)} กรุณากด 'ส่ง OTP อีกครั้ง'",
+        )
+
+    return {"message": "สมัครสมาชิกสำเร็จ กรุณากรอก OTP ที่ส่งไปยังอีเมลของคุณเพื่อยืนยันตัวตน"}
+
+
+@router.post("/verify-otp")
+def verify_otp_endpoint(payload: schemas.OtpVerifyRequest, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.email == payload.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้นี้ในระบบ")
+
+    if user.is_verified:
+        return {"message": "บัญชีนี้ยืนยันตัวตนไปแล้ว"}
+
+    otp_record = (
+        db.query(models.OtpVerification)
+        .filter(
+            models.OtpVerification.user_id == user.id,
+            models.OtpVerification.purpose == REGISTER_PURPOSE,
+        )
+        .first()
+    )
+
+    if not otp_record or otp_record.is_used:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ไม่พบ OTP ที่ใช้งานได้ กรุณาขอ OTP ใหม่",
+        )
+
+    now = datetime.now(timezone.utc)
+    if now > otp_record.expires_at:
+        otp_record.is_used = True
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OTP หมดอายุแล้ว กรุณาขอ OTP ใหม่",
+        )
+
+    if otp_record.attempt_count >= OTP_MAX_ATTEMPTS:
+        otp_record.is_used = True
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="กรอก OTP ผิดเกินจำนวนครั้งที่กำหนด กรุณาขอ OTP ใหม่",
+        )
+
+    if not verify_otp(payload.otp, otp_record.otp_hash):
+        otp_record.attempt_count += 1
+        remaining = OTP_MAX_ATTEMPTS - otp_record.attempt_count
+        if remaining <= 0:
+            otp_record.is_used = True
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"OTP ไม่ถูกต้อง (เหลือโอกาสกรอกอีก {max(remaining, 0)} ครั้ง)",
+        )
+
+    # ถูกต้อง
+    otp_record.is_used = True
+    user.is_verified = True
+    db.commit()
+
+    return {"message": "ยืนยันตัวตนสำเร็จ สามารถเข้าสู่ระบบได้แล้ว"}
+
+
+@router.post("/resend-otp")
+def resend_otp(payload: schemas.OtpResendRequest, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.email == payload.email).first()
+    if not user:
+        # ไม่บอกตรงๆ ว่าอีเมลนี้ไม่มีในระบบ เพื่อกัน user enumeration
+        return {"message": "หากอีเมลนี้อยู่ในระบบ เราได้ส่ง OTP ใหม่ไปให้แล้ว"}
+
+    if user.is_verified:
+        return {"message": "บัญชีนี้ยืนยันตัวตนไปแล้ว ไม่จำเป็นต้องขอ OTP อีก"}
+
+    # [Rate limit]: ขอ resend ได้ 3 ครั้ง/ชม./อีเมล
+    check_rate_limit(
+        db,
+        f"resend_otp_{payload.email}",
+        "resend_otp",
+        limit=OTP_RESEND_LIMIT_PER_HOUR,
+        window_minutes=60,
+    )
+
+    # [Cooldown]: ห้ามขอถี่กว่า 60 วิ ต่อครั้ง — เช็คจาก record เดียวของ (user, purpose) นี้ (มีแค่แถวเดียวเสมอ)
+    latest_otp = (
+        db.query(models.OtpVerification)
+        .filter(
+            models.OtpVerification.user_id == user.id,
+            models.OtpVerification.purpose == REGISTER_PURPOSE,
+        )
+        .first()
+    )
+    if latest_otp:
+        elapsed = (datetime.now(timezone.utc) - latest_otp.created_at).total_seconds()
+        if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
+            wait_more = int(OTP_RESEND_COOLDOWN_SECONDS - elapsed)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"กรุณารออีก {wait_more} วินาทีก่อนขอ OTP ใหม่",
+            )
+
+    try:
+        _create_and_send_otp(db, user)
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+
+    return {"message": "ส่ง OTP ใหม่ไปยังอีเมลของคุณแล้ว"}
+
+
+@router.post("/login", response_model=schemas.Token)
+def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    client_ip = request.client.host
+
+    normalized_email = form_data.username.strip().lower()
+    rate_limit_key = f"login_fail_{normalized_email}_{client_ip}"
+
+    user = db.query(models.User).filter(models.User.email == normalized_email).first()
+
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        check_rate_limit(db, rate_limit_key, "login_fail", limit=5, window_minutes=15)
+        raise HTTPException(status_code=401, detail="อีเมลหรือรหัสผ่านไม่ถูกต้อง")
+
+    if not user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="กรุณายืนยันอีเมลด้วย OTP ก่อนเข้าสู่ระบบ",
+        )
+
+    access_token = create_access_token(data={"sub": user.email})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+# ---------------------------------------------------------------------------
+# Forgot Password — flow A: forgot-password -> verify-reset-otp -> reset-password
+# แต่ละขั้นตอนมี rate limit ของตัวเอง แยกจากกัน กันทั้งการ spam ขอ OTP,
+# การไล่เดา OTP, และการยิง reset-password รัวๆ ด้วย token ที่ขโมยมา
+# ---------------------------------------------------------------------------
+
+@router.post("/forgot-password")
+def forgot_password(payload: schemas.ForgotPasswordRequest, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.email == payload.email).first()
+
+    generic_message = {"message": "หากอีเมลนี้อยู่ในระบบ เราได้ส่ง OTP สำหรับตั้งรหัสผ่านใหม่ไปให้แล้ว"}
+
+    if not user:
+        # ไม่บอกตรงๆ ว่าอีเมลนี้ไม่มีในระบบ เพื่อกัน user enumeration (เหมือน resend-otp)
+        return generic_message
+
+    if not user.is_verified:
+        # บัญชีที่ยังไม่ verify ไม่มีทางตั้งรหัสผ่านใหม่ได้อยู่แล้ว (login ไม่ได้ตั้งแต่แรก)
+        # ตอบ generic message เหมือนเดิม ไม่บอกสถานะบัญชีให้ผู้ไม่หวังดีรู้
+        return generic_message
+
+    # [Rate limit]: ขอ OTP รีเซ็ตรหัสผ่านได้ 3 ครั้ง/ชม./อีเมล (เหมือน resend-otp)
+    check_rate_limit(
+        db,
+        f"forgot_password_{payload.email}",
+        "forgot_password",
+        limit=OTP_RESEND_LIMIT_PER_HOUR,
+        window_minutes=60,
+    )
+
+    # [Cooldown]: ห้ามขอถี่กว่า 60 วิ ต่อครั้ง — เช็คจาก record เดียวของ (user, purpose) นี้ (มีแค่แถวเดียวเสมอ)
+    latest_otp = (
+        db.query(models.OtpVerification)
+        .filter(
+            models.OtpVerification.user_id == user.id,
+            models.OtpVerification.purpose == PASSWORD_RESET_PURPOSE,
+        )
+        .first()
+    )
+    if latest_otp:
+        elapsed = (datetime.now(timezone.utc) - latest_otp.created_at).total_seconds()
+        if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
+            wait_more = int(OTP_RESEND_COOLDOWN_SECONDS - elapsed)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"กรุณารออีก {wait_more} วินาทีก่อนขอ OTP ใหม่",
+            )
+
+    try:
+        _create_and_send_otp(db, user, purpose=PASSWORD_RESET_PURPOSE)
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+
+    return generic_message
+
+
+@router.post("/verify-reset-otp", response_model=schemas.ResetTokenResponse)
+def verify_reset_otp(payload: schemas.VerifyResetOtpRequest, request: Request, db: Session = Depends(get_db)):
+    client_ip = request.client.host
+
+    # [Rate limit]: กันไล่เดา OTP ถี่ๆ ผ่าน endpoint นี้ — 5 ครั้ง/15 นาที/อีเมล+IP
+    # (แยกจาก attempt_count ในตัว record เอง ซึ่งจำกัดต่อ OTP หนึ่งใบ ส่วนอันนี้จำกัดภาพรวมของ endpoint)
+    check_rate_limit(
+        db,
+        f"verify_reset_otp_{payload.email}_{client_ip}",
+        "verify_reset_otp",
+        limit=5,
+        window_minutes=15,
+    )
+
+    user = db.query(models.User).filter(models.User.email == payload.email).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OTP ไม่ถูกต้องหรือหมดอายุ")
+
+    otp_record = (
+        db.query(models.OtpVerification)
+        .filter(
+            models.OtpVerification.user_id == user.id,
+            models.OtpVerification.purpose == PASSWORD_RESET_PURPOSE,
+        )
+        .first()
+    )
+
+    if not otp_record or otp_record.is_used:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ไม่พบ OTP ที่ใช้งานได้ กรุณาขอ OTP ใหม่",
+        )
+
+    now = datetime.now(timezone.utc)
+    if now > otp_record.expires_at:
+        otp_record.is_used = True
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OTP หมดอายุแล้ว กรุณาขอ OTP ใหม่",
+        )
+
+    if otp_record.attempt_count >= OTP_MAX_ATTEMPTS:
+        otp_record.is_used = True
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="กรอก OTP ผิดเกินจำนวนครั้งที่กำหนด กรุณาขอ OTP ใหม่",
+        )
+
+    if not verify_otp(payload.otp, otp_record.otp_hash):
+        otp_record.attempt_count += 1
+        remaining = OTP_MAX_ATTEMPTS - otp_record.attempt_count
+        if remaining <= 0:
+            otp_record.is_used = True
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"OTP ไม่ถูกต้อง (เหลือโอกาสกรอกอีก {max(remaining, 0)} ครั้ง)",
+        )
+
+    # ถูกต้อง — ปิด OTP นี้ทันที (ใช้ครั้งเดียว) แล้วออก reset token อายุสั้นแทน
+    otp_record.is_used = True
+    db.commit()
+
+    reset_token = create_password_reset_token(user.email)
+    return schemas.ResetTokenResponse(reset_token=reset_token)
+
+
+@router.post("/reset-password")
+def reset_password(payload: schemas.ResetPasswordRequest, request: Request, db: Session = Depends(get_db)):
+    # ตรวจ token ก่อน (ได้ email กลับมาถ้าถูกต้อง) — token หมดอายุ/ปลอม จะ raise ในนี้เลย
+    email = decode_password_reset_token(payload.reset_token)
+
+    client_ip = request.client.host
+
+    # [Rate limit]: กันยิง reset-password รัวๆ ด้วย token ที่หลุด/เดา — 5 ครั้ง/ชม./อีเมล+IP
+    check_rate_limit(
+        db,
+        f"reset_password_{email}_{client_ip}",
+        "reset_password",
+        limit=5,
+        window_minutes=60,
+    )
+
+    user = db.query(models.User).filter(models.User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ไม่พบผู้ใช้นี้ในระบบ")
+
+    user.hashed_password = get_password_hash(payload.new_password)
+    db.commit()
+
+    return {"message": "ตั้งรหัสผ่านใหม่สำเร็จ กรุณาเข้าสู่ระบบด้วยรหัสผ่านใหม่"}
