@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, Request, Form
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -20,6 +21,22 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 app = FastAPI(lifespan=lifespan, title="SmartLPR Webhook System")
+
+# ---------------------------------------------------------------------------
+# CORS — อนุญาตให้หน้า static (index.html ที่รันแยกด้วย `python -m http.server`
+# บน origin คนละพอร์ตกับ backend นี้) เรียก fetch() เข้ามาได้
+# ถ้า deploy หน้าเว็บที่ domain/พอร์ตอื่น ต้องมาแก้ allow_origins ให้ตรงด้วย
+# ---------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # นำ Endpoint จากไฟล์ routers มาเสียบเข้ากับแอปหลัก
 app.include_router(auth.router)
