@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List
 
 import models, schemas
 from database import get_db
 from security import get_current_user, require_api_key
 from camera_url_guard import verify_camera_rtsp_url
 from rate_limiter import check_rate_limit
+from pagination import PageParams
 
 router = APIRouter(prefix="/my", tags=["My Cameras"])
 
@@ -68,28 +68,45 @@ def add_my_camera(
     )
 
 
-@router.get("/cameras", response_model=List[schemas.MyCameraResponse])
+@router.get("/cameras", response_model=schemas.PaginatedResponse[schemas.MyCameraResponse])
 def list_my_cameras(
+    page_params: PageParams = Depends(),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """List กล้องของตัวเองทั้งหมด พร้อม verification_status (pending/verified/failed)"""
+    """List กล้องของตัวเองทั้งหมด พร้อม verification_status (pending/verified/failed)
+
+    รองรับ pagination ผ่าน query param ?page=&page_size= (ดีฟอลต์ page=1, page_size=20)
+    เขียน paginate เองในนี้ (ไม่เรียก pagination.paginate ตรงๆ) เพราะต้อง map
+    Camera (ORM) -> MyCameraResponse เอง ก่อนใส่ลง items (field ไม่ตรงกับคอลัมน์ตรงๆ)
+    """
+    base_query = db.query(models.Camera).filter(models.Camera.owner_user_id == current_user.id)
+
+    total = base_query.count()
     cameras = (
-        db.query(models.Camera)
-        .filter(models.Camera.owner_user_id == current_user.id)
+        base_query
         .order_by(models.Camera.id.desc())
+        .offset(page_params.offset)
+        .limit(page_params.page_size)
         .all()
     )
+    total_pages = (total + page_params.page_size - 1) // page_params.page_size if total else 0
 
-    return [
-        schemas.MyCameraResponse(
-            camera_id=c.id,
-            is_active=c.is_active,
-            verification_status=c.verification_status,
-            created_at=c.created_at,
-        )
-        for c in cameras
-    ]
+    return {
+        "items": [
+            schemas.MyCameraResponse(
+                camera_id=c.id,
+                is_active=c.is_active,
+                verification_status=c.verification_status,
+                created_at=c.created_at,
+            )
+            for c in cameras
+        ],
+        "total": total,
+        "page": page_params.page,
+        "page_size": page_params.page_size,
+        "total_pages": total_pages,
+    }
 
 
 @router.delete("/cameras/{camera_id}")

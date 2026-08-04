@@ -1,42 +1,35 @@
-import socket
-import ipaddress
 import uuid
 import requests
 from urllib.parse import urlparse
 from fastapi import HTTPException, status
+from ip_guard import resolve_and_check_ip, SSRFBlockedError
+
 
 def verify_webhook_url(url: str):
     """
     ตรวจสอบ URL เพื่อป้องกัน SSRF และยืนยันว่าปลายทางพร้อมรับข้อมูลได้จริง
     (ตอบ 200 OK + echo event_id กลับมาให้ตรง ตามสัญญาที่ระบบใช้ยืนยัน ACK จริง)
+
+    เรียกครั้งเดียวตอน POST /webhook/add เท่านั้น (สร้าง endpoint ใหม่) — การเช็คซ้ำก่อนยิงจริง
+    ทุกครั้งอยู่ที่ is_url_host_safe() ด้านล่าง ซึ่ง worker.py เรียกเองก่อน client.post() ทุกครั้ง
+    เพื่อกัน DNS rebinding (โดเมนถูกเปลี่ยน DNS record หลังผ่านการเช็คตอนสร้าง endpoint ไปแล้ว)
     """
     parsed_url = urlparse(url)
-    
-    # 1. บังคับใช้ HTTPS เท่านั้น 
+
+    # 1. บังคับใช้ HTTPS เท่านั้น
     if parsed_url.scheme != "https":
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, 
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="เพื่อความปลอดภัย URL ต้องเป็น HTTPS เท่านั้น"
         )
-    
+
     hostname = parsed_url.hostname
-    
+
+    # 2-3. แปลง DNS -> IP แล้วเช็ค private/loopback/link-local (logic กลางอยู่ที่ ip_guard.py)
     try:
-        # 2. แปลงชื่อโดเมน (DNS) ให้กลายเป็น IP Address
-        ip = socket.gethostbyname(hostname)
-        ip_obj = ipaddress.ip_address(ip)
-        
-        # 3. เช็คว่าเป็น IP ภายใน (Private / Loopback) หรือไม่
-        if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, 
-                detail="ไม่อนุญาตให้ใช้ IP ภายในเครือข่าย (Private/Loopback IP)"
-            )
-    except socket.gaierror:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, 
-            detail="ไม่สามารถค้นหาที่อยู่ IP ของโดเมนนี้ได้ "
-        )
+        resolve_and_check_ip(hostname)
+    except SSRFBlockedError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     # 4. ทดสอบยิง POST ไปยังปลายทาง พร้อม field จริง (camera_id/event_id ขึ้นต้นด้วย "TEST_"
     #    ตามสัญญาที่แจ้งไว้ในคู่มือ ให้ปลายทางเช็ค event_id.startswith("TEST") แยกออกจาก event จริงได้)
@@ -77,5 +70,27 @@ def verify_webhook_url(url: str):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ปลายทางได้: {str(e)}"
         )
-        
+
     return True
+
+
+def is_url_host_safe(url: str) -> bool:
+    """
+    เช็คซ้ำแบบเบา (ไม่ยิง POST ทดสอบ ไม่บังคับ HTTPS ซ้ำ — เช็คตอนสร้างไปแล้วและ target_url
+    ที่เก็บใน DB การันตี https:// อยู่แล้ว) — resolve DNS ใหม่จาก hostname เดิมทุกครั้งที่เรียก
+    ใช้ก่อนยิง webhook จริงทุกครั้งใน worker.py (_send_webhook_request, _ping_endpoint)
+
+    กัน DNS rebinding: โดเมนที่ผ่านการเช็คตอนสร้าง endpoint (verify_webhook_url) แล้ว แต่ภายหลัง
+    เจ้าของโดเมนเปลี่ยน DNS record ให้ชี้ไปยัง internal IP จะถูกจับได้ตรงนี้ก่อนยิงจริงทุกรอบ
+
+    คืน True/False เฉยๆ ไม่ raise เพราะ caller (worker.py) ไม่ได้อยู่ใน request context —
+    ต้องจัดการผลลัพธ์เป็น "ส่งไม่สำเร็จ" ธรรมดาแล้วปล่อยให้เข้า retry/circuit-breaker logic เดิม
+    """
+    hostname = urlparse(url).hostname
+    if not hostname:
+        return False
+    try:
+        resolve_and_check_ip(hostname)
+        return True
+    except SSRFBlockedError:
+        return False

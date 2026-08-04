@@ -9,6 +9,7 @@ from database import get_db
 from security import require_admin
 from email_service import send_access_approved_email, send_access_rejected_email
 from notification_utils import resolve_notifications
+from pagination import PageParams, paginate
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -20,16 +21,18 @@ _DEFAULT_REJECT_NOTE = "คำขอของคุณไม่ได้รั�
 # Access Request — คำขอใช้งานระบบโดยรวม
 # ---------------------------------------------------------------------------
 
-@router.get("/access-requests", response_model=List[schemas.AccessRequestResponse])
+@router.get("/access-requests", response_model=schemas.PaginatedResponse[schemas.AccessRequestResponse])
 def list_access_requests(
     status_filter: Optional[str] = Query(
         default="pending",
         alias="status",
         description="กรองตามสถานะ: pending / approved / rejected (ไม่ใส่ = ดูทั้งหมด)",
     ),
+    page_params: PageParams = Depends(),
     db: Session = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
+    """รองรับ pagination ผ่าน query param ?page=&page_size= (ดีฟอลต์ page=1, page_size=20)"""
     if status_filter and status_filter not in _VALID_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -39,8 +42,9 @@ def list_access_requests(
     query = db.query(models.AccessRequest)
     if status_filter:
         query = query.filter(models.AccessRequest.status == status_filter)
+    query = query.order_by(models.AccessRequest.id.desc())
 
-    return query.order_by(models.AccessRequest.id.desc()).all()
+    return paginate(query, page_params)
 
 
 @router.get("/access-requests/{request_id}", response_model=schemas.AccessRequestResponse)
@@ -105,13 +109,16 @@ def review_access_request(
 # และเปิด/ปิดกล้องของใครก็ได้ (เช่น กรณีผิดกฎ) ไม่มีสิทธิ์สร้าง/แจกจ่ายสิทธิ์แล้ว
 # ---------------------------------------------------------------------------
 
-@router.get("/cameras", response_model=List[schemas.CameraAdminResponse])
+@router.get("/cameras", response_model=schemas.PaginatedResponse[schemas.CameraAdminResponse])
 def list_cameras(
+    page_params: PageParams = Depends(),
     db: Session = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    """ดูกล้องทั้งหมดในระบบ ไม่ว่าใครเป็นเจ้าของ"""
-    return db.query(models.Camera).order_by(models.Camera.id.desc()).all()
+    """ดูกล้องทั้งหมดในระบบ ไม่ว่าใครเป็นเจ้าของ
+    รองรับ pagination ผ่าน query param ?page=&page_size= (ดีฟอลต์ page=1, page_size=20)"""
+    query = db.query(models.Camera).order_by(models.Camera.id.desc())
+    return paginate(query, page_params)
 
 
 @router.get("/cameras/{camera_id}", response_model=schemas.CameraAdminResponse)

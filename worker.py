@@ -10,6 +10,9 @@ import models
 from database import SessionLocal
 from email_service import send_webhook_endpoint_unhealthy_email
 from config import UNVERIFIED_USER_EXPIRE_HOURS, PLATE_DATA_RETENTION_DAYS
+from ssrf_guard import is_url_host_safe
+from camera_url_guard import resolve_rtsp_url_pinned
+from ip_guard import SSRFBlockedError
 
 # ตั้งค่าระยะเวลา Retry (ครั้งที่ 1=3 นาที, ครั้งที่ 2=5 นาที, ครั้งที่ 3=10 นาที)
 RETRY_DELAYS = {1: 3, 2: 5, 3: 10}
@@ -48,6 +51,21 @@ def _is_valid_ack(event: models.WebhookEvent, response: httpx.Response) -> bool:
 async def _send_webhook_request(client: httpx.AsyncClient, event: models.WebhookEvent):
     """ยิง 1 event จริงออกไป คืน (result_type, error_msg) เท่านั้น ไม่แตะ DB ในนี้เลย
     (กัน sync DB call ไปบล็อก event loop ตอนรันพร้อมกันหลาย coroutine ผ่าน asyncio.gather)"""
+
+    # [SSRF Guard]: เช็คซ้ำก่อนยิงจริงทุกครั้ง กัน DNS rebinding — โดเมนอาจถูกเปลี่ยน DNS record
+    # หลังผ่านการเช็คตอนสร้าง endpoint (verify_webhook_url) ไปแล้ว resolve DNS เป็น blocking call
+    # เลยรันใน thread แยกไม่ให้บล็อก event loop เช็คก่อนเปิดไฟล์ด้วย (fail fast ไม่เสีย I/O เปล่าๆ)
+    is_safe = await asyncio.to_thread(is_url_host_safe, event.target_url)
+    if not is_safe:
+        logging.warning(
+            f"[SSRF Guard] ปฏิเสธการส่ง Event ID: {event.id} — target_url resolve ไปยัง "
+            f"IP ที่ไม่อนุญาตในขณะนี้ (อาจเป็น DNS rebinding)"
+        )
+        return "ssrf_blocked", (
+            "ปฏิเสธการส่ง: โดเมนปลายทาง resolve ไปยัง IP ที่ไม่อนุญาตในขณะนี้ "
+            "(อาจเกิดจาก DNS ถูกเปลี่ยนหลังผ่านการตรวจสอบตอนสร้าง endpoint ไปแล้ว)"
+        )
+
     try:
         with open(event.full_image_path, "rb") as f_full, \
              open(event.crop_image_path, "rb") as f_crop:
@@ -127,7 +145,9 @@ def _apply_send_result(event, endpoint, result_type, error_msg):
                 just_tripped_endpoint = endpoint
 
     else:
-        # ครอบคลุมทั้ง http_error, ack_mismatch, error ธรรมดา — เข้า retry logic เดียวกันหมด
+        # ครอบคลุมทั้ง http_error, ack_mismatch, ssrf_blocked, error ธรรมดา — เข้า retry logic เดียวกันหมด
+        # (ssrf_blocked ก็ถือเป็นความล้มเหลวของ endpoint นี้เหมือนกัน ถ้าเกิดติดกันครบ threshold
+        # circuit breaker จะตัดไฟให้เองเหมือนเหตุผลอื่นๆ ไม่ต้องมี branch พิเศษแยก)
         logging.warning(f"ส่งข้อมูลไม่สำเร็จ Event ID: {event.id} | ประเภท: {result_type} | Error: {error_msg}")
         event.attempt_count += 1
 
@@ -234,6 +254,15 @@ async def _ping_endpoint(client: httpx.AsyncClient, url: str) -> bool:
     ในคู่มือ ให้ปลายทางแยกจาก event จริงได้) แล้วเช็คว่าตอบ 200 พร้อม echo event_id กลับมาตรงกัน
     เหมือนเงื่อนไข ACK จริง — ถ้าตอบแค่ 200 เฉยๆ แต่ไม่ echo event_id ให้ตรง ไม่ถือว่าฟื้นจริง
     """
+    # [SSRF Guard]: เช็คซ้ำก่อนยิงจริงทุกครั้งเหมือน _send_webhook_request — endpoint ที่ถูกตัดไฟ
+    # อาจโดน DNS rebinding ระหว่างที่ตัดไฟอยู่ก็ได้ ไม่ควรถือว่า "ฟื้น" แค่เพราะ ping ผ่าน
+    is_safe = await asyncio.to_thread(is_url_host_safe, url)
+    if not is_safe:
+        logging.warning(
+            f"[SSRF Guard] ข้าม health check เพราะ host ของ {url} resolve ไปยัง IP ที่ไม่อนุญาตในขณะนี้"
+        )
+        return False
+
     test_event_id = f"TEST_Event_{uuid.uuid4().hex[:8]}"
     test_camera_id = f"TEST_Camera_{uuid.uuid4().hex[:8]}"
     dummy_payload = {"camera_id": test_camera_id, "event_id": test_event_id}
@@ -338,10 +367,20 @@ def _try_open_rtsp(rtsp_url: str) -> bool:
     timeout ที่ตั้งไว้ได้จริง (asyncio.wait_for จะ "เลิกรอ" แต่ thread เบื้องหลังอาจยังค้างอยู่)
     เป็นข้อจำกัดที่รู้อยู่แล้วของ OpenCV ไม่ใช่บั๊ก — ถ้าต้องการ timeout แม่นยำ 100% ต้องใช้ไลบรารี
     RTSP แบบ async โดยเฉพาะแทน ซึ่งเกินขอบเขตตอนนี้
+
+    [SSRF Guard]: pin IP ก่อน connect เสมอ (resolve_rtsp_url_pinned) กัน DNS rebinding —
+    ไม่ใช่แค่เช็คแล้วปล่อยผ่าน hostname เดิม เพราะ cv2.VideoCapture ใช้ FFmpeg resolve DNS
+    เองอีกรอบ ไม่ผ่าน Python เลย (ดู camera_url_guard.resolve_rtsp_url_pinned)
     """
+    try:
+        pinned_url = resolve_rtsp_url_pinned(rtsp_url)
+    except SSRFBlockedError as e:
+        logging.warning(f"[SSRF Guard] ปฏิเสธการตรวจสอบ RTSP: {e}")
+        return False
+
     cap = None
     try:
-        cap = cv2.VideoCapture(rtsp_url)
+        cap = cv2.VideoCapture(pinned_url)
         if not cap.isOpened():
             return False
         ret, frame = cap.read()
@@ -484,6 +523,27 @@ async def cleanup_expired_revoked_tokens():
     finally:
         db.close()
 
+
+async def cleanup_expired_refresh_tokens():
+    """ลบ refresh token ที่หมดอายุไปแล้ว (ไม่ว่าจะเคยถูก rotate/revoke ไปก่อนหน้าหรือไม่ก็ตาม)
+    เกณฑ์เดียวคือ expires_at ผ่านไปแล้ว — ไม่มีประโยชน์ต้องเก็บไว้ต่อเพราะยืนยันตัวตนอะไรไม่ได้แล้ว
+    (แถวที่ revoked_at ไม่ใช่ None แต่ expires_at ยังไม่ถึง จะยังไม่ถูกลบ เผื่อไว้ตรวจสอบ/debug replay ย้อนหลัง)"""
+    db: Session = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc)
+        result = db.query(models.RefreshToken).filter(
+            models.RefreshToken.expires_at <= now,
+        ).delete(synchronize_session=False)
+        db.commit()
+        if result:
+            logging.info(f"ลบ refresh token ที่หมดอายุไปแล้ว {result} รายการ")
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Cleanup refresh tokens ทำงานผิดพลาด: {e}")
+    finally:
+        db.close()
+
+
 def start_scheduler():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(process_webhook_queue, 'interval', seconds=30)
@@ -492,5 +552,6 @@ def start_scheduler():
     scheduler.add_job(cleanup_unverified_users, 'interval', hours=1)
     scheduler.add_job(cleanup_old_plate_data, 'interval', hours=24)
     scheduler.add_job(cleanup_expired_revoked_tokens, 'interval', hours=1)
+    scheduler.add_job(cleanup_expired_refresh_tokens, 'interval', hours=1)
     scheduler.start()
     return scheduler

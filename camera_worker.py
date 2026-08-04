@@ -16,6 +16,8 @@ import numpy as np
 import requests
 from ultralytics import YOLO
 from plate_ocr import predict as ocr_predict
+from camera_url_guard import resolve_rtsp_url_pinned
+from ip_guard import SSRFBlockedError
 
 import tensorflow as tf
 tf.get_logger().setLevel("ERROR")  # ซ่อน log ระดับ absl ที่ TF_CPP_MIN_LOG_LEVEL เก็บไม่หมด
@@ -209,9 +211,37 @@ def save_capture(camera_id, frame, plate_crop, plate, province, color, save_dir_
     send_to_webhook(camera_id, path_full, path_crop, plate, province, color, ts_display, logger)
 
 
-def open_stream(url):
-    cap = cv.VideoCapture(url)
+def open_stream(url, logger):
+    """เปิด RTSP stream ด้วย IP ที่ resolve + เช็คแล้วเท่านั้น (pin IP กัน DNS rebinding)
+
+    เหตุผลที่ต้อง "แทน IP ตรงๆ ใน URL" ก่อนส่งให้ cv.VideoCapture แทนที่จะแค่เช็คแล้วปล่อยผ่าน
+    hostname เดิม: cv.VideoCapture เปิด RTSP ผ่าน FFmpeg (C library) ซึ่ง resolve DNS เองอีกรอบ
+    ไม่ผ่าน Python เลย ต่อให้ฝั่ง Python เช็คแล้วว่า IP ปลอดภัย ก็ไม่การันตีว่า FFmpeg จะได้ IP
+    เดียวกัน (ดู camera_url_guard.resolve_rtsp_url_pinned สำหรับรายละเอียดเต็ม)
+
+    คืน None ถ้า host ไม่ผ่านการตรวจสอบ (SSRF) หรือ resolve ไม่ได้ — caller (_open_stream_with_retry)
+    จะรอแล้ว retry เอง เหมือนเวลา stream ต่อไม่ติดด้วยเหตุผลอื่น ไม่ crash process ทิ้ง"""
+    try:
+        pinned_url = resolve_rtsp_url_pinned(url)
+    except SSRFBlockedError as e:
+        logger.warning(f"[SSRF Guard] ปฏิเสธการเชื่อมต่อ RTSP: {e}")
+        return None
+
+    cap = cv.VideoCapture(pinned_url)
     cap.set(cv.CAP_PROP_BUFFERSIZE, 1)
+    return cap
+
+
+def _open_stream_with_retry(rtsp_url, logger):
+    """เรียก open_stream() วนซ้ำจนกว่าจะสำเร็จ (ไม่ปล่อย None ออกไปให้ caller เห็นเลย)
+    ใช้ทั้งตอนเริ่ม process ครั้งแรกและตอน reconnect หลัง stream หลุด — ถ้าถูก SSRF guard ปฏิเสธ
+    (เช่น rtsp_url โดน DNS rebinding ไปชี้ IP ภายในแล้ว) จะวนรอเหมือนกรณี stream ต่อไม่ติดปกติ
+    ไม่ crash หรือหยุดทำงานไปเฉยๆ"""
+    cap = open_stream(rtsp_url, logger)
+    while cap is None:
+        logger.warning(f"เชื่อมต่อ RTSP ไม่ได้ (URL ไม่ผ่าน SSRF guard หรือต่อไม่ติด) — รอ {RECONNECT_SEC} วินาทีแล้วลองใหม่...")
+        time.sleep(RECONNECT_SEC)
+        cap = open_stream(rtsp_url, logger)
     return cap
 
 
@@ -240,7 +270,7 @@ def run(camera_id: str, rtsp_url: str):
         color_class_names = json.load(f)
 
     logger.info(f"เชื่อมต่อ RTSP: {rtsp_url}")
-    cap = open_stream(rtsp_url)
+    cap = _open_stream_with_retry(rtsp_url, logger)
 
     last_detect_time = 0.0
 
@@ -253,7 +283,7 @@ def run(camera_id: str, rtsp_url: str):
             logger.warning(f"Stream หลุด — รอ {RECONNECT_SEC} วินาทีแล้ว reconnect...")
             cap.release()
             time.sleep(RECONNECT_SEC)
-            cap = open_stream(rtsp_url)
+            cap = _open_stream_with_retry(rtsp_url, logger)
             continue
 
         now = time.time()

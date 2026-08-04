@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from typing import List
 import models, schemas
 from database import get_db
 from security import require_access_approved, get_current_user
 from ssrf_guard import verify_webhook_url
 from rate_limiter import check_rate_limit
+from pagination import PageParams, paginate
 
 router = APIRouter(prefix="/webhook", tags=["Webhook Management"])
 
@@ -42,8 +42,9 @@ def add_webhook(
     return new_endpoint
 
 
-@router.get("/my", response_model=List[schemas.WebhookResponse])
+@router.get("/my", response_model=schemas.PaginatedResponse[schemas.WebhookResponse])
 def list_my_webhooks(
+    page_params: PageParams = Depends(),
     db: Session = Depends(get_db),
     # แค่ดูข้อมูล ไม่มีสิทธิ์สร้าง/แก้ -> ใช้ get_current_user เฉยๆ พอ ตาม dependency rule ข้อ 7
     current_user: models.User = Depends(get_current_user),
@@ -52,10 +53,12 @@ def list_my_webhooks(
     List webhook endpoint ทั้งหมดของตัวเอง พร้อมสถานะ circuit breaker
     (is_healthy, consecutive_dead_letters) — ใช้ทำ dashboard ดูภาพรวมว่า endpoint ไหน
     กำลังมีปัญหา/ถูกตัดไฟอยู่บ้าง
+
+    รองรับ pagination ผ่าน query param ?page=&page_size= (ดีฟอลต์ page=1, page_size=20)
     """
-    return (
+    query = (
         db.query(models.WebhookEndpoint)
         .filter(models.WebhookEndpoint.user_id == current_user.id)
         .order_by(models.WebhookEndpoint.id.desc())
-        .all()
     )
+    return paginate(query, page_params)

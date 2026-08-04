@@ -3,8 +3,15 @@ from pydantic import BaseModel, EmailStr, HttpUrl, Field, field_validator, model
 from datetime import datetime
 from typing import Optional, Literal
 
+from pagination import PaginatedResponse  # re-export ให้เรียกผ่าน schemas.PaginatedResponse ได้เหมือนโมเดลอื่น
+
 _PASSWORD_ALLOWED_RE = re.compile(r"^[A-Za-z0-9]+$")
 _OTP_RE = re.compile(r"^\d{6}$")
+
+# bcrypt (ที่ใช้ผ่าน passlib ใน security.py) ตัดรหัสผ่านทิ้งอัตโนมัติถ้ายาวเกิน 72 bytes
+# ทำให้รหัสผ่านยาวๆ ที่ต่างกันแค่ท้ายๆ กลายเป็น hash เดียวกันแบบเงียบๆ
+# เลยบังคับ max length ไว้ตรงนี้กันตั้งแต่ชั้น validation ไม่ให้ผู้ใช้ตั้งรหัสผ่านที่ยาวเกินจริง
+PASSWORD_MAX_LENGTH = 72
 
 
 def _validate_password_rules(v: str) -> str:
@@ -14,6 +21,9 @@ def _validate_password_rules(v: str) -> str:
 
     if len(v) < 8:
         errors.append("ต้องมีความยาวอย่างน้อย 8 ตัวอักษร")
+
+    if len(v) > PASSWORD_MAX_LENGTH:
+        errors.append(f"ต้องมีความยาวไม่เกิน {PASSWORD_MAX_LENGTH} ตัวอักษร")
 
     if not _PASSWORD_ALLOWED_RE.match(v):
         errors.append(
@@ -37,15 +47,20 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str = Field(
         ...,
+        max_length=PASSWORD_MAX_LENGTH,
         description=(
-            "รหัสผ่านต้องมีความยาวอย่างน้อย 8 ตัวอักษร "
+            f"รหัสผ่านต้องมีความยาว 8-{PASSWORD_MAX_LENGTH} ตัวอักษร "
             "ใช้ได้เฉพาะตัวอักษรภาษาอังกฤษ (a-z, A-Z) และตัวเลข (0-9) เท่านั้น "
             "และต้องมีทั้งตัวอักษรภาษาอังกฤษอย่างน้อย 1 ตัว และตัวเลขอย่างน้อย 1 ตัว "
             "(ห้ามภาษาไทย เว้นวรรค หรืออักขระพิเศษ)"
         ),
         examples=["Passw0rd"],
     )
-    confirm_password: str = Field(..., description="กรอกรหัสผ่านซ้ำอีกครั้งเพื่อยืนยัน ต้องตรงกับ password")
+    confirm_password: str = Field(
+        ...,
+        max_length=PASSWORD_MAX_LENGTH,
+        description="กรอกรหัสผ่านซ้ำอีกครั้งเพื่อยืนยัน ต้องตรงกับ password",
+    )
 
     @field_validator("email")
     @classmethod
@@ -134,8 +149,12 @@ class ResetTokenResponse(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     reset_token: str
-    new_password: str = Field(..., examples=["Passw0rd"])
-    confirm_new_password: str = Field(..., description="กรอกรหัสผ่านใหม่ซ้ำอีกครั้งเพื่อยืนยัน ต้องตรงกับ new_password")
+    new_password: str = Field(..., max_length=PASSWORD_MAX_LENGTH, examples=["Passw0rd"])
+    confirm_new_password: str = Field(
+        ...,
+        max_length=PASSWORD_MAX_LENGTH,
+        description="กรอกรหัสผ่านใหม่ซ้ำอีกครั้งเพื่อยืนยัน ต้องตรงกับ new_password",
+    )
 
     @field_validator("new_password")
     @classmethod
