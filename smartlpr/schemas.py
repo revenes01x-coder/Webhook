@@ -309,20 +309,6 @@ class MyCameraResponse(BaseModel):
     created_at: datetime
 
 
-# ---- สำหรับ In-app Notification ของ admin ----
-class AdminNotificationResponse(BaseModel):
-    id: int
-    request_type: str
-    request_id: int
-    message: str
-    is_read: bool
-    resolved_at: Optional[datetime] = None
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
 # ---- สำหรับ API Key (ระบบอัตโนมัติของ user ใช้แทน JWT ตอนยิงเข้ามาเอง) ----
 class ApiKeyResponse(BaseModel):
     api_key: str

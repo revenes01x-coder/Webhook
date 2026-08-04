@@ -5,7 +5,6 @@ from smartlpr import models
 import smartlpr.schemas as schemas
 from smartlpr.database import get_db
 from smartlpr.security import get_current_user, require_terms_accepted
-from services.notification_utils import notify_admins
 from smartlpr.pagination import PageParams, paginate
 
 router = APIRouter(prefix="/access-request", tags=["Access Request"])
@@ -45,12 +44,6 @@ def submit_access_request(
     db.add(new_request)
     db.flush()  # ได้ new_request.id ก่อน commit จริง เอาไปใส่ในข้อความแจ้งเตือน
 
-    notify_admins(
-        db,
-        request_type="access_request",
-        request_id=new_request.id,
-        message=f"คำขอใช้งานระบบใหม่จาก {new_request.organization_name} (#{new_request.id})",
-    )
 
     db.commit()
     db.refresh(new_request)

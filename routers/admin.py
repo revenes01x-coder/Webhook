@@ -9,7 +9,6 @@ import smartlpr.schemas as schemas
 from smartlpr.database import get_db
 from smartlpr.security import require_admin
 from services.email_service import send_access_approved_email, send_access_rejected_email
-from services.notification_utils import resolve_notifications
 from smartlpr.pagination import PageParams, paginate
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -86,7 +85,6 @@ def review_access_request(
         req.status = "rejected"
         req.admin_note = payload.admin_note  # ไม่บังคับ อาจเป็น None
 
-    resolve_notifications(db, "access_request", req.id)
 
     db.commit()
     db.refresh(req)
@@ -155,44 +153,3 @@ def set_camera_status(
     db.refresh(camera)
     return camera
 
-
-# ---------------------------------------------------------------------------
-# In-app Notification สำหรับ admin (กล่องข้อความในเว็บ)
-# ---------------------------------------------------------------------------
-
-@router.get("/notifications", response_model=schemas.PaginatedResponse[schemas.AdminNotificationResponse])
-def list_notifications(
-    unread_only: bool = Query(default=False),
-    page_params: PageParams = Depends(),
-    db: Session = Depends(get_db),
-    admin: models.User = Depends(require_admin),
-):
-    """
-    รองรับ pagination ผ่าน query param ?page=&page_size= (ดีฟอลต์ page=1, page_size=20)
-    เหมือน endpoint อื่นๆ ในระบบ — เดิมส่ง list ทั้งหมดมาทีเดียว พอ notification สะสมนาน
-    เข้าจะโตไม่จำกัด เปลี่ยนมาแบ่งหน้าให้เหมือนกันทั้งระบบ
-    """
-    query = db.query(models.AdminNotification).filter(models.AdminNotification.admin_id == admin.id)
-    if unread_only:
-        query = query.filter(models.AdminNotification.is_read == False)  # noqa: E712
-    query = query.order_by(models.AdminNotification.id.desc())
-    return paginate(query, page_params)
-
-
-@router.post("/notifications/{notification_id}/mark-read", response_model=schemas.AdminNotificationResponse)
-def mark_notification_read(
-    notification_id: int,
-    db: Session = Depends(get_db),
-    admin: models.User = Depends(require_admin),
-):
-    noti = db.query(models.AdminNotification).filter(
-        models.AdminNotification.id == notification_id,
-        models.AdminNotification.admin_id == admin.id,
-    ).first()
-    if not noti:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ไม่พบการแจ้งเตือนนี้")
-
-    noti.is_read = True
-    db.commit()
-    db.refresh(noti)
-    return noti
