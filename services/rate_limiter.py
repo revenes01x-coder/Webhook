@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException, status
-import models
+from smartlpr import models
 
 
 def check_rate_limit(db: Session, key: str, action: str, limit: int, window_minutes: int):

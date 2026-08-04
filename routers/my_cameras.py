@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-import models, smartlpr.schemas as schemas
+from smartlpr import models
+import smartlpr.schemas as schemas
 from smartlpr.database import get_db
 from smartlpr.security import get_current_user, require_api_key
 from security.camera_url_guard import verify_camera_rtsp_url

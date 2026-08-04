@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timezone
-import models
+from smartlpr import models
 from smartlpr.database import engine, get_db
 from routers import auth, webhook, terms, admin, access_request, my_cameras, api_key
 from worker import start_scheduler

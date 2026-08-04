@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from smartlpr.database import get_db
 from smartlpr.config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, PASSWORD_RESET_TOKEN_EXPIRE_MINUTES
 from services.token import hash_api_key
-import models
+from smartlpr import models
 import uuid 
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")

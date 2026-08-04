@@ -5,7 +5,8 @@ from fastapi.security import OAuth2PasswordRequestForm
 from datetime import datetime, timedelta, timezone
 import uuid
 
-import models, smartlpr.schemas as schemas
+from smartlpr import models
+import smartlpr.schemas as schemas
 from smartlpr.database import get_db
 from smartlpr.security import (
     get_password_hash,

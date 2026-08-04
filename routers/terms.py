@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-import models
+from smartlpr import models
 from smartlpr.database import get_db
 from smartlpr.security import get_current_user
 

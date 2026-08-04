@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-import models, smartlpr.schemas as schemas
+from smartlpr import models
+import smartlpr.schemas as schemas
 from smartlpr.database import get_db
 from smartlpr.security import get_current_user, require_terms_accepted
 from services.notification_utils import notify_admins

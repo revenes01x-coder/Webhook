@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-import models, smartlpr.schemas as schemas
+from smartlpr import models
+import smartlpr.schemas as schemas
 from smartlpr.database import get_db
 from smartlpr.security import require_access_approved, get_current_user
 from security.ssrf_guard import verify_webhook_url

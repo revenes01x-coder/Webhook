@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
-import models
+from smartlpr import models
 
 
 def notify_admins(db: Session, request_type: str, request_id: int, message: str) -> None:

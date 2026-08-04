@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.orm import Session
-import models
+from smartlpr import models
 from smartlpr.database import SessionLocal
 from services.email_service import send_webhook_endpoint_unhealthy_email
 from smartlpr.config import UNVERIFIED_USER_EXPIRE_HOURS, PLATE_DATA_RETENTION_DAYS

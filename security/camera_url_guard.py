@@ -1,6 +1,6 @@
 from urllib.parse import urlparse, urlunparse
 from fastapi import HTTPException, status
-from betacode.security.ip_guard import resolve_and_check_ip, SSRFBlockedError
+from security.ip_guard import resolve_and_check_ip, SSRFBlockedError
 
 
 def verify_camera_rtsp_url(rtsp_url: str) -> None:

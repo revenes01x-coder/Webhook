@@ -4,7 +4,8 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 from typing import List, Optional
 
-import models, smartlpr.schemas as schemas
+from smartlpr import models
+import smartlpr.schemas as schemas
 from smartlpr.database import get_db
 from smartlpr.security import require_admin
 from services.email_service import send_access_approved_email, send_access_rejected_email
