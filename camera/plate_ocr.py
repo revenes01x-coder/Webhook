@@ -1,19 +1,36 @@
+import sys
 import torch
 import torch.nn.functional as F
 from PIL import Image
 import numpy as np
 import cv2
-import sys
-sys.path.insert(0, r'C:\Users\ACER\Downloads\MyProject\PlateDetection\deep-text-recognition-benchmark')
+
+from smartlpr.config import (
+    PLATE_DETECTION_REPO_PATH,
+    PLATE_OCR_MODEL_PATH,
+    PLATE_OCR_CHAR_FILE,
+)
+
+_missing = [
+    name for name, value in (
+        ("PLATE_DETECTION_REPO_PATH", PLATE_DETECTION_REPO_PATH),
+        ("PLATE_OCR_MODEL_PATH", PLATE_OCR_MODEL_PATH),
+        ("PLATE_OCR_CHAR_FILE", PLATE_OCR_CHAR_FILE),
+    ) if not value
+]
+if _missing:
+    raise RuntimeError(
+        "camera/plate_ocr.py ต้องการ Environment Variable ต่อไปนี้ใน .env: "
+        f"{', '.join(_missing)} (ดูตัวอย่างค่าที่ต้องตั้งใน .env.example)"
+    )
+
+sys.path.insert(0, PLATE_DETECTION_REPO_PATH)
 
 from model import Model
 from utils import CTCLabelConverter, AttnLabelConverter
 
-# ============================================================
-#  CONFIG
-# ============================================================
-MODEL_PATH = r'C:\Users\ACER\Downloads\MyProject\PlateDetection\custom_model\thai_platev1.pth'
-CHAR_FILE   = r'C:\Users\ACER\Downloads\MyProject\PlateDetection\thai_plate_chars.txt'
+MODEL_PATH = PLATE_OCR_MODEL_PATH
+CHAR_FILE = PLATE_OCR_CHAR_FILE
 
 IMG_H        = 32
 IMG_W        = 100

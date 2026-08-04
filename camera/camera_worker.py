@@ -19,23 +19,45 @@ from camera.plate_ocr import predict as ocr_predict
 from security.camera_url_guard import resolve_rtsp_url_pinned
 from security.ip_guard import SSRFBlockedError
 
+from smartlpr.config import (
+    PLATE_YOLO_MODEL_PATH,
+    CAR_DETECTOR_MODEL_PATH,
+    CAR_COLOR_MODEL_PATH,
+    CAR_COLOR_CLASSNAMES_PATH,
+    CAPTURES_SAVE_DIR,
+    CAPTURE_EVENT_WEBHOOK_URL,
+)
+
 import tensorflow as tf
 tf.get_logger().setLevel("ERROR")  # ซ่อน log ระดับ absl ที่ TF_CPP_MIN_LOG_LEVEL เก็บไม่หมด
 from tensorflow.keras.applications.efficientnet import preprocess_input as color_model_preprocess
 
-# ---- CONFIG ที่ต้องปรับตามเครื่องจริง (เดิมอยู่ใน main_rtsp2.py / test_model4.py) ----
-YOLO_MODEL_PATH = r"C:\Users\ACER\Downloads\MyProject\PlateDetection\models\best.pt"
-CAR_DETECTOR_MODEL_PATH = "yolo11n.pt"  # pretrained บน COCO, โหลดอัตโนมัติครั้งแรกที่รัน
+_missing = [
+    name for name, value in (
+        ("PLATE_YOLO_MODEL_PATH", PLATE_YOLO_MODEL_PATH),
+        ("CAR_COLOR_MODEL_PATH", CAR_COLOR_MODEL_PATH),
+        ("CAR_COLOR_CLASSNAMES_PATH", CAR_COLOR_CLASSNAMES_PATH),
+    ) if not value
+]
+if _missing:
+    raise RuntimeError(
+        "camera/camera_worker.py ต้องการ Environment Variable ต่อไปนี้ใน .env: "
+        f"{', '.join(_missing)} (ดูตัวอย่างค่าที่ต้องตั้งใน .env.example)"
+    )
+
+YOLO_MODEL_PATH = PLATE_YOLO_MODEL_PATH                 # YOLO หาป้ายทะเบียน (เทรนเอง)
+# CAR_DETECTOR_MODEL_PATH: pretrained บน COCO, โหลดอัตโนมัติครั้งแรกที่รัน — ดีฟอลต์ "yolo11n.pt"
+# ตั้งใน .env ได้เหมือนกันถ้าต้องการ ไม่บังคับเหมือนตัวอื่นด้านบน
 CAR_CLASS_IDS = [2, 3, 5, 7]  # COCO class id: 2=car, 3=motorcycle, 5=bus, 7=truck
 CAR_BOX_EXPAND_RATIO = 0.025  # ขยายกรอบรถออกก่อนหาป้าย กันป้ายโดนตัดขาดถ้าอยู่ขอบกรอบพอดี
 
-COLOR_MODEL_PATH = r"C:\Users\ACER\Downloads\MyProject\PlateDetection\models\car_color_model.h5"
-COLOR_CLASSNAMES_PATH = r"C:\Users\ACER\Downloads\MyProject\PlateDetection\models\class_names.json"
+COLOR_MODEL_PATH = CAR_COLOR_MODEL_PATH
+COLOR_CLASSNAMES_PATH = CAR_COLOR_CLASSNAMES_PATH
 COLOR_IMG_SIZE = (224, 224)  # ต้องตรงกับตอนเทรน (IMG_SIZE ใน train_car_color.py)
 COLOR_MIN_CONFIDENCE = 0.3   # ถ้าโมเดลมั่นใจต่ำกว่านี้ ให้ตอบ "unknown" แทน
 
-SAVE_DIR_ROOT   = r"C:\Users\ACER\Downloads\MyProject\PlateDetection\captures"
-WEBHOOK_URL     = "http://localhost:8000/capture-event"
+SAVE_DIR_ROOT   = CAPTURES_SAVE_DIR                     # ดีฟอลต์ "captures" (relative, อยู่ใน .gitignore)
+WEBHOOK_URL     = CAPTURE_EVENT_WEBHOOK_URL             # ดีฟอลต์ "http://localhost:8000/capture-event"
 
 YOLO_CONF        = 0.4
 MIN_ASPECT_RATIO = 0.8
