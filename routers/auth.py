@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Response, Cookie
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from fastapi.security import OAuth2PasswordRequestForm
 from datetime import datetime, timedelta, timezone
+import uuid
 
 import models, schemas
 from database import get_db
@@ -18,18 +19,75 @@ from security import (
 )
 from rate_limiter import check_rate_limit
 from otp_utils import generate_otp, hash_otp, verify_otp
+from refresh_token_utils import generate_refresh_token, hash_refresh_token
 from email_service import send_otp_email, send_password_reset_otp_email
 from config import (
     OTP_EXPIRE_MINUTES,
     OTP_MAX_ATTEMPTS,
     OTP_RESEND_COOLDOWN_SECONDS,
     OTP_RESEND_LIMIT_PER_HOUR,
+    REFRESH_TOKEN_EXPIRE_DAYS,
+    COOKIE_SECURE,
 )
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 REGISTER_PURPOSE = "register"
 PASSWORD_RESET_PURPOSE = "password_reset"
+
+REFRESH_TOKEN_COOKIE_NAME = "refresh_token"
+
+
+# ---------------------------------------------------------------------------
+# Refresh Token helpers — ใช้ร่วมกันระหว่าง login / refresh / logout
+# ---------------------------------------------------------------------------
+
+def _issue_refresh_token(db: Session, user: models.User, family_id: str | None = None) -> str:
+    """สร้าง refresh token ใหม่ 1 ใบ คืน plaintext ให้ caller เอาไปตั้ง cook (เก็บแค่ hash ลง DB)
+
+    ไม่ส่ง family_id มา (login ครั้งแรก) -> สร้าง family_id ใหม่ทั้งสาย
+    ส่ง family_id มา (ตอน rotate ใน POST /auth/refresh) -> ใช้ family_id เดิม
+    เพื่อให้ตรวจจับการเอา token เก่าที่ revoke ไปแล้วมาใช้ซ้ำได้ทั้งสาย ไม่ใช่แค่ใบต่อใบ"""
+    plain_token = generate_refresh_token()
+    now = datetime.now(timezone.utc)
+
+    record = models.RefreshToken(
+        user_id=user.id,
+        family_id=family_id or uuid.uuid4().hex,
+        token_hash=hash_refresh_token(plain_token),
+        is_revoked=False,
+        expires_at=now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
+    )
+    db.add(record)
+    db.commit()
+
+    return plain_token
+
+
+def _set_refresh_cookie(response: Response, plain_token: str) -> None:
+    response.set_cookie(
+        key=REFRESH_TOKEN_COOKIE_NAME,
+        value=plain_token,
+        max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="strict",
+        path="/auth",
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie(key=REFRESH_TOKEN_COOKIE_NAME, path="/auth")
+
+
+def _revoke_token_family(db: Session, family_id: str) -> None:
+    """Revoke refresh token ทุกใบใน family นี้ที่ยังไม่ถูก revoke — ใช้ตอนตรวจพบการ reuse
+    (สัญญาณ token หลุด) และตอน logout (revoke ทั้งสาย ไม่ใช่แค่ใบที่ถืออยู่ตอนนี้)"""
+    db.query(models.RefreshToken).filter(
+        models.RefreshToken.family_id == family_id,
+        models.RefreshToken.is_revoked == False,  # noqa: E712
+    ).update({"is_revoked": True}, synchronize_session=False)
+    db.commit()
 
 
 def _create_and_send_otp(db: Session, user: models.User, purpose: str = REGISTER_PURPOSE) -> models.OtpVerification:
@@ -226,7 +284,12 @@ def resend_otp(payload: schemas.OtpResendRequest, db: Session = Depends(get_db))
 
 
 @router.post("/login", response_model=schemas.Token)
-def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+def login(
+    request: Request,
+    response: Response,
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+):
     client_ip = request.client.host
 
     normalized_email = form_data.username.strip().lower()
@@ -245,7 +308,78 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
         )
 
     access_token = create_access_token(data={"sub": user.email})
+
+    # ออก refresh token ใบใหม่ (family ใหม่ทั้งสาย) ใส่ httpOnly cookie ให้เลย
+    plain_refresh_token = _issue_refresh_token(db, user)
+    _set_refresh_cookie(response, plain_refresh_token)
+
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@router.post("/refresh", response_model=schemas.Token)
+def refresh_access_token(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    refresh_token: str | None = Cookie(default=None, alias=REFRESH_TOKEN_COOKIE_NAME),
+):
+    """
+    ออก access token ใบใหม่จาก refresh token ใน httpOnly cookie — เรียกตอนแอปโหลดขึ้นมาใหม่
+    (เช่น กด refresh หน้าเว็บ) หรือตอน access token หมดอายุ (15 นาที) แทนที่จะบังคับ login ใหม่
+    Frontend ต้องเรียกด้วย credentials ที่แนบ cookie ไปด้วยเสมอ (เช่น fetch(..., {credentials: "include"}))
+
+    Rotate ทุกครั้งที่เรียกสำเร็จ: refresh token ใบเก่าถูก revoke ทันที ออกใบใหม่แทนที่ใน cookie
+    (ใน family เดิม) ป้องกัน token ใบเดียวถูกใช้ซ้ำได้ไม่จำกัดจนกว่าจะหมดอายุ
+
+    Reuse detection: ถ้า token ที่ส่งมาถูก revoke ไปแล้วก่อนหน้า (เช่น โดนขโมยไปใช้ซ้ำหลัง
+    เจ้าของตัวจริง refresh ไปแล้ว หรือใครเอา cookie เก่าที่ถูกแทนที่แล้วมายิงซ้ำ) ถือเป็นสัญญาณ
+    ว่า token หลุด -> revoke ทั้ง family ทันที บังคับ login ใหม่ทั้งหมดทุกอุปกรณ์
+    """
+    invalid_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Refresh token ไม่ถูกต้องหรือหมดอายุ กรุณาเข้าสู่ระบบใหม่อีกครั้ง",
+    )
+
+    if not refresh_token:
+        raise invalid_exception
+
+    client_ip = request.client.host
+    # [Rate limit]: กันยิง /auth/refresh รัวๆ — 30 ครั้ง/ชม./IP
+    check_rate_limit(db, f"refresh_token_{client_ip}", "refresh_token", limit=30, window_minutes=60)
+
+    token_hash = hash_refresh_token(refresh_token)
+    record = db.query(models.RefreshToken).filter(models.RefreshToken.token_hash == token_hash).first()
+
+    if not record:
+        _clear_refresh_cookie(response)
+        raise invalid_exception
+
+    now = datetime.now(timezone.utc)
+
+    if record.is_revoked:
+        # ใบนี้เคยถูก rotate ทิ้งไปแล้ว แต่มีคนเอามาใช้ซ้ำ -> สัญญาณ token หลุด revoke ทั้งสายทันที
+        _revoke_token_family(db, record.family_id)
+        _clear_refresh_cookie(response)
+        raise invalid_exception
+
+    if now > record.expires_at:
+        _clear_refresh_cookie(response)
+        raise invalid_exception
+
+    user = db.query(models.User).filter(models.User.id == record.user_id).first()
+    if not user or not user.is_verified:
+        _clear_refresh_cookie(response)
+        raise invalid_exception
+
+    # Rotate: ปิดใบเก่า ออกใบใหม่ใน family เดิม
+    record.is_revoked = True
+    db.commit()
+
+    new_plain_token = _issue_refresh_token(db, user, family_id=record.family_id)
+    _set_refresh_cookie(response, new_plain_token)
+
+    new_access_token = create_access_token(data={"sub": user.email})
+    return {"access_token": new_access_token, "token_type": "bearer"}
 
 
 # ---------------------------------------------------------------------------
@@ -400,16 +534,42 @@ def reset_password(payload: schemas.ResetPasswordRequest, request: Request, db: 
     user.hashed_password = get_password_hash(payload.new_password)
     db.commit()
 
+    # เปลี่ยนรหัสผ่านแล้ว ถือว่า session เก่าทั้งหมดไม่ควรใช้ต่อได้ (เผื่อรหัสผ่านหลุดไปพร้อม
+    # refresh token เก่า) revoke refresh token ทุกใบของ user คนนี้ที่ยังไม่ revoke
+    active_families = (
+        db.query(models.RefreshToken.family_id)
+        .filter(
+            models.RefreshToken.user_id == user.id,
+            models.RefreshToken.is_revoked == False,  # noqa: E712
+        )
+        .distinct()
+        .all()
+    )
+    for (family_id,) in active_families:
+        _revoke_token_family(db, family_id)
+
     return {"message": "ตั้งรหัสผ่านใหม่สำเร็จ กรุณาเข้าสู่ระบบด้วยรหัสผ่านใหม่"}
 
 @router.post("/logout")
 def logout(
+    response: Response,
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
+    refresh_token: str | None = Cookie(default=None, alias=REFRESH_TOKEN_COOKIE_NAME),
 ):
-    """Revoke access token ปัจจุบัน — หลัง logout token ใบนี้ใช้ต่อไม่ได้อีกทันที
-    แม้จะยังไม่หมดอายุตามปกติ (ปกติ 15 นาที) ต้อง login ใหม่เพื่อขอ token ใบใหม่"""
+    """Revoke access token ปัจจุบัน (blacklist ทันทีผ่าน jti) + revoke refresh token ทั้ง family
+    (ไม่ใช่แค่ใบที่ถืออยู่ กันใบเก่าที่เคย rotate ไปแล้วแต่ยังไม่หมดอายุหลุดรอด) แล้ว clear cookie
+    หลัง logout token ทั้งคู่ใช้ต่อไม่ได้อีกทันที แม้จะยังไม่หมดอายุตามปกติ"""
     revoke_token(db, token)
+
+    if refresh_token:
+        token_hash = hash_refresh_token(refresh_token)
+        record = db.query(models.RefreshToken).filter(models.RefreshToken.token_hash == token_hash).first()
+        if record:
+            _revoke_token_family(db, record.family_id)
+
+    _clear_refresh_cookie(response)
+
     return {"message": "ออกจากระบบเรียบร้อยแล้ว"}
 
 @router.get("/me", response_model=schemas.UserMeResponse)

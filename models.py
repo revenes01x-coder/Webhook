@@ -172,3 +172,26 @@ class RevokedToken(Base):
     jti = Column(String, unique=True, index=True, nullable=False)
     revoked_expires_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class RefreshToken(Base):
+    """Refresh token สำหรับ httpOnly cookie flow — เก็บแบบ hash เท่านั้น (เหมือน OTP/API key)
+    ไม่เก็บ plaintext ลง DB เด็ดขาด (ดู refresh_token_utils.py)
+
+    family_id: uuid เดียวกันตลอดทุกครั้งที่ rotate จาก login ครั้งเดียวกัน ใช้ตรวจจับการ reuse —
+    ทุกครั้งที่เรียก POST /auth/refresh สำเร็จ ใบเก่าจะถูก revoke (is_revoked=True) ทันที
+    และออกใบใหม่ใน family เดิมแทน ถ้ามีใครเอาใบที่ revoke ไปแล้วมาใช้ซ้ำ (เช่น token หลุด/ถูกขโมย
+    แล้ว attacker ใช้ก่อนเจ้าของตัวจริง) ระบบจะ revoke ทั้ง family ทันที บังคับ login ใหม่ทั้งหมด
+
+    worker.py มี cleanup_expired_refresh_tokens() ลบ record ที่ expires_at ผ่านไปแล้วทุก 1 ชม.
+    (แถวที่ is_revoked=True แต่ยังไม่หมดอายุจะยังไม่ถูกลบ เผื่อไว้ตรวจสอบ/debug reuse ย้อนหลัง)"""
+    __tablename__ = "refresh_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    family_id = Column(String, nullable=False, index=True)
+    token_hash = Column(String, nullable=False, unique=True, index=True)
+
+    is_revoked = Column(Boolean, default=False, nullable=False, index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
