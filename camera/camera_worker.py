@@ -15,9 +15,9 @@ import cv2 as cv
 import numpy as np
 import requests
 from ultralytics import YOLO
-from betacode.camera.plate_ocr import predict as ocr_predict
-from betacode.security.camera_url_guard import resolve_rtsp_url_pinned
-from betacode.security.ip_guard import SSRFBlockedError
+from camera.plate_ocr import predict as ocr_predict
+from security.camera_url_guard import resolve_rtsp_url_pinned
+from security.ip_guard import SSRFBlockedError
 
 import tensorflow as tf
 tf.get_logger().setLevel("ERROR")  # ซ่อน log ระดับ absl ที่ TF_CPP_MIN_LOG_LEVEL เก็บไม่หมด

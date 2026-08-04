@@ -2,7 +2,7 @@ import uuid
 import requests
 from urllib.parse import urlparse
 from fastapi import HTTPException, status
-from betacode.security.ip_guard import resolve_and_check_ip, SSRFBlockedError
+from security.ip_guard import resolve_and_check_ip, SSRFBlockedError
 
 
 def verify_webhook_url(url: str):

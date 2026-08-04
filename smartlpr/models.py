@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, JSON, UniqueConstraint
 from sqlalchemy.sql import func
-from database import Base
+from smartlpr.database import Base
 
 
 class User(Base):

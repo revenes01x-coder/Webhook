@@ -18,8 +18,7 @@ from smartlpr.security import (
     oauth2_scheme,
 )
 from services.rate_limiter import check_rate_limit
-from services.otp_utils import generate_otp, hash_otp, verify_otp
-from services.refresh_token_utils import generate_refresh_token, hash_refresh_token
+from services.token import generate_otp, hash_otp, verify_otp, generate_refresh_token, hash_refresh_token
 from services.email_service import send_otp_email, send_password_reset_otp_email
 from smartlpr.config import (
     OTP_EXPIRE_MINUTES,
