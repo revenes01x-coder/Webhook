@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-import models, schemas
-from database import get_db
-from security import require_access_approved, get_current_user
-from ssrf_guard import verify_webhook_url
-from rate_limiter import check_rate_limit
-from pagination import PageParams, paginate
+import models, smartlpr.schemas as schemas
+from smartlpr.database import get_db
+from smartlpr.security import require_access_approved, get_current_user
+from security.ssrf_guard import verify_webhook_url
+from services.rate_limiter import check_rate_limit
+from smartlpr.pagination import PageParams, paginate
 
 router = APIRouter(prefix="/webhook", tags=["Webhook Management"])
 

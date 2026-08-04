@@ -19,8 +19,8 @@ import logging
 import multiprocessing as mp
 
 import models
-import camera_worker
-from database import SessionLocal
+import betacode.camera.camera_worker as camera_worker
+from smartlpr.database import SessionLocal
 
 POLL_INTERVAL_SECONDS = 30
 TERMINATE_TIMEOUT_SECONDS = 10

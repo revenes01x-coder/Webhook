@@ -5,8 +5,8 @@
 import sys
 sys.path.insert(0, ".")
 
-from email_service import send_otp_email
-from otp_utils import generate_otp
+from betacode.services.email_service import send_otp_email
+from betacode.services.otp_utils import generate_otp
 
 TEST_EMAIL = "phonch01x@gmail.com"  # แก้ตรงนี้ — Gmail SMTP ส่งหาใครก็ได้ ไม่จำกัดเหมือน Resend sandbox
 

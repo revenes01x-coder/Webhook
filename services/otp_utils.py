@@ -1,7 +1,7 @@
 import hmac
 import hashlib
 import secrets
-from config import SECRET_KEY, OTP_LENGTH
+from smartlpr.config import SECRET_KEY, OTP_LENGTH
 
 
 def generate_otp() -> str:

@@ -1,7 +1,7 @@
 import hmac
 import hashlib
 import secrets
-from config import SECRET_KEY
+from smartlpr.config import SECRET_KEY
 
 API_KEY_PREFIX = "sk_live_"
 

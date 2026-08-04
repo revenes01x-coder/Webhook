@@ -1,7 +1,7 @@
 import hmac
 import hashlib
 import secrets
-from config import SECRET_KEY
+from smartlpr.config import SECRET_KEY
 
 REFRESH_TOKEN_BYTES = 48
 

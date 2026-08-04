@@ -5,9 +5,9 @@ from fastapi.security import OAuth2PasswordRequestForm
 from datetime import datetime, timedelta, timezone
 import uuid
 
-import models, schemas
-from database import get_db
-from security import (
+import models, smartlpr.schemas as schemas
+from smartlpr.database import get_db
+from smartlpr.security import (
     get_password_hash,
     verify_password,
     create_access_token,
@@ -17,11 +17,11 @@ from security import (
     get_current_user,
     oauth2_scheme,
 )
-from rate_limiter import check_rate_limit
-from otp_utils import generate_otp, hash_otp, verify_otp
-from refresh_token_utils import generate_refresh_token, hash_refresh_token
-from email_service import send_otp_email, send_password_reset_otp_email
-from config import (
+from services.rate_limiter import check_rate_limit
+from services.otp_utils import generate_otp, hash_otp, verify_otp
+from services.refresh_token_utils import generate_refresh_token, hash_refresh_token
+from services.email_service import send_otp_email, send_password_reset_otp_email
+from smartlpr.config import (
     OTP_EXPIRE_MINUTES,
     OTP_MAX_ATTEMPTS,
     OTP_RESEND_COOLDOWN_SECONDS,

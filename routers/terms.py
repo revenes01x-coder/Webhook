@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 import models
-from database import get_db
-from security import get_current_user
+from smartlpr.database import get_db
+from smartlpr.security import get_current_user
 
 router = APIRouter(prefix="/terms", tags=["Terms"])
 

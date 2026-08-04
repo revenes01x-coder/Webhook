@@ -13,7 +13,7 @@ Script สำหรับตั้งให้ user ที่มีอยู่�
     python make_admin.py user@example.com --revoke
 """
 import sys
-from database import SessionLocal
+from smartlpr.database import SessionLocal
 import models
 
 

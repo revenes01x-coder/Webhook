@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-import models, schemas
-from database import get_db
-from security import get_current_user, require_terms_accepted
-from notification_utils import notify_admins
-from pagination import PageParams, paginate
+import models, smartlpr.schemas as schemas
+from smartlpr.database import get_db
+from smartlpr.security import get_current_user, require_terms_accepted
+from services.notification_utils import notify_admins
+from smartlpr.pagination import PageParams, paginate
 
 router = APIRouter(prefix="/access-request", tags=["Access Request"])
 

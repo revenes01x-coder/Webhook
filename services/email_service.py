@@ -3,7 +3,7 @@ import smtplib
 from html import escape as html_escape
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from config import SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_APP_PASSWORD, EMAIL_FROM_NAME, OTP_EXPIRE_MINUTES
+from smartlpr.config import SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_APP_PASSWORD, EMAIL_FROM_NAME, OTP_EXPIRE_MINUTES
 
 
 def _send_email(to_email: str, subject: str, html_body: str) -> None:

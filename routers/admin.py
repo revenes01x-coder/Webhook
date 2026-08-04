@@ -4,12 +4,12 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 from typing import List, Optional
 
-import models, schemas
-from database import get_db
-from security import require_admin
-from email_service import send_access_approved_email, send_access_rejected_email
-from notification_utils import resolve_notifications
-from pagination import PageParams, paginate
+import models, smartlpr.schemas as schemas
+from smartlpr.database import get_db
+from smartlpr.security import require_admin
+from services.email_service import send_access_approved_email, send_access_rejected_email
+from services.notification_utils import resolve_notifications
+from smartlpr.pagination import PageParams, paginate
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 

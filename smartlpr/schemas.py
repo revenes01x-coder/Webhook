@@ -3,7 +3,7 @@ from pydantic import BaseModel, EmailStr, HttpUrl, Field, field_validator, model
 from datetime import datetime
 from typing import Optional, Literal
 
-from pagination import PaginatedResponse  # re-export ให้เรียกผ่าน schemas.PaginatedResponse ได้เหมือนโมเดลอื่น
+from betacode.smartlpr.pagination import PaginatedResponse  # re-export ให้เรียกผ่าน schemas.PaginatedResponse ได้เหมือนโมเดลอื่น
 
 _PASSWORD_ALLOWED_RE = re.compile(r"^[A-Za-z0-9]+$")
 _OTP_RE = re.compile(r"^\d{6}$")

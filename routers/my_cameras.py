@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-import models, schemas
-from database import get_db
-from security import get_current_user, require_api_key
-from camera_url_guard import verify_camera_rtsp_url
-from rate_limiter import check_rate_limit
-from pagination import PageParams
+import models, smartlpr.schemas as schemas
+from smartlpr.database import get_db
+from smartlpr.security import get_current_user, require_api_key
+from security.camera_url_guard import verify_camera_rtsp_url
+from services.rate_limiter import check_rate_limit
+from smartlpr.pagination import PageParams
 
 router = APIRouter(prefix="/my", tags=["My Cameras"])
 
