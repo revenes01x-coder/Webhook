@@ -125,18 +125,6 @@ def list_cameras(
     return paginate(query, page_params)
 
 
-@router.get("/cameras/{camera_id}", response_model=schemas.CameraAdminResponse)
-def get_camera_detail(
-    camera_id: str,
-    db: Session = Depends(get_db),
-    admin: models.User = Depends(require_admin),
-):
-    camera = db.query(models.Camera).filter(models.Camera.id == camera_id).first()
-    if not camera:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ไม่พบกล้องนี้")
-    return camera
-
-
 @router.get("/users", response_model=schemas.PaginatedResponse[schemas.UserAdminResponse])
 def list_users(
     page_params: PageParams = Depends(),

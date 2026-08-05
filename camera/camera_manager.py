@@ -1,19 +1,3 @@
-"""
-Camera Manager — process กลางตัวเดียวที่ดูแลกล้องทุกตัว
-แทนที่การรันไฟล์กล้องแยกทีละไฟล์ (main_rtsp2.py) แบบเดิม
-
-การทำงาน:
-1. ดึงรายชื่อกล้อง active จากตาราง Camera ในฐานข้อมูลทุก 30 วินาที
-2. สำหรับกล้องแต่ละตัวที่ active, spawn เป็น 1 multiprocessing.Process แยกกัน
-   (ใช้ process ไม่ใช่ thread เพราะ YOLO inference เป็นงาน CPU-heavy ที่ thread
-   ทำงานพร้อมกันจริงไม่ได้เนื่องจาก GIL)
-3. Monitor: ถ้า process ของกล้องไหน crash/ตาย -> restart อัตโนมัติในรอบถัดไป
-4. ถ้า admin ปิดใช้งานกล้องไหน (is_active=False) -> terminate process นั้นในรอบถัดไป
-5. ถ้า rtsp_url ของกล้องถูกแก้ไข -> restart process ด้วย url ใหม่ในรอบถัดไป
-
-วิธีรัน: python camera_manager.py
-Deploy จริงรันผ่าน systemd หรือ nohup ก็เพียงพอสำหรับ scale 2-3 กล้อง
-"""
 import time
 import logging
 import multiprocessing as mp

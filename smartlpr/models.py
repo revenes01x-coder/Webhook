@@ -92,26 +92,6 @@ class Camera(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
-class AdminNotification(Base):
-    """แจ้งเตือนในเว็บสำหรับ admin เมื่อมีคำขอใหม่เข้ามา (access-request)
-    fan-out หนึ่ง record ต่อ admin หนึ่งคนตอนคำขอถูกส่งเข้ามา
-    is_read = admin คนนี้เปิดดูรึยัง (ต่อคน), resolved_at = คำขอต้นเรื่องถูก approve/reject ไปแล้วรึยัง
-    (ค่าเดียวกันทุก record ที่ผูกกับคำขอเดียวกัน ไม่ว่า admin คนไหนเป็นคนกด)"""
-    __tablename__ = "admin_notifications"
-
-    id = Column(Integer, primary_key=True, index=True)
-    admin_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-
-    request_type = Column(String, nullable=False, index=True)  # ปัจจุบันมีแค่ "access_request"
-    request_id = Column(Integer, nullable=False, index=True)
-
-    message = Column(String, nullable=False)
-    is_read = Column(Boolean, default=False, nullable=False, index=True)
-    resolved_at = Column(DateTime(timezone=True), nullable=True)
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
-
-
 class RateLimit(Base):
     __tablename__ = "rate_limits"
 

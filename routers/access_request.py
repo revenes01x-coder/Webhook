@@ -17,6 +17,24 @@ def submit_access_request(
     # ต้องผ่าน require_terms_accepted ก่อนเสมอ (login -> terms -> access-request)
     current_user: models.User = Depends(require_terms_accepted),
 ):
+    # ห้ามส่งซ้ำถ้าเคยได้รับอนุมัติ (status "approved") ไปแล้ว — สิทธิ์การใช้งานติดตัวถาวร
+    # ไม่ต้องขอใหม่อีก (require_access_approved เช็คแค่ "เคยมี approved" อยู่แล้ว ไม่ใช่
+    # "ล่าสุดคือ approved" ดังนั้น submit ซ้ำไม่มีผลอะไรกับสิทธิ์ที่มีอยู่ มีแต่สร้าง record
+    # ขยะให้ admin ต้องมาพิจารณาซ้ำโดยไม่จำเป็น)
+    already_approved = (
+        db.query(models.AccessRequest)
+        .filter(
+            models.AccessRequest.user_id == current_user.id,
+            models.AccessRequest.status == "approved",
+        )
+        .first()
+    )
+    if already_approved:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="คุณได้รับอนุมัติให้ใช้งานระบบนี้ไปแล้ว ไม่จำเป็นต้องส่งคำขอใหม่",
+        )
+
     # ห้ามส่งซ้ำถ้ามี request ที่ status "pending" อยู่แล้ว
     existing_pending = (
         db.query(models.AccessRequest)

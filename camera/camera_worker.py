@@ -46,8 +46,6 @@ if _missing:
     )
 
 YOLO_MODEL_PATH = PLATE_YOLO_MODEL_PATH                 # YOLO หาป้ายทะเบียน (เทรนเอง)
-# CAR_DETECTOR_MODEL_PATH: pretrained บน COCO, โหลดอัตโนมัติครั้งแรกที่รัน — ดีฟอลต์ "yolo11n.pt"
-# ตั้งใน .env ได้เหมือนกันถ้าต้องการ ไม่บังคับเหมือนตัวอื่นด้านบน
 CAR_CLASS_IDS = [2, 3, 5, 7]  # COCO class id: 2=car, 3=motorcycle, 5=bus, 7=truck
 CAR_BOX_EXPAND_RATIO = 0.025  # ขยายกรอบรถออกก่อนหาป้าย กันป้ายโดนตัดขาดถ้าอยู่ขอบกรอบพอดี
 
