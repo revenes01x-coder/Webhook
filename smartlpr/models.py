@@ -19,6 +19,12 @@ class User(Base):
     # --- เพิ่มใหม่: Admin flag ---
     is_admin = Column(Boolean, default=False, nullable=False)
 
+    # --- เพิ่มใหม่: ระงับการใช้งาน (admin กดระงับ) ---
+    # ไม่บล็อก login แต่บล็อก action สำคัญ (เพิ่ม webhook, ขอ/regenerate API key, ยิง API key เข้ามา)
+    # ดู smartlpr/security.py: require_access_approved / require_api_key
+    is_suspended = Column(Boolean, default=False, nullable=False)
+    suspended_reason = Column(Text, nullable=True)  # เหตุผลที่ admin ระบุตอนระงับ (ไม่บังคับ)
+
     # --- เพิ่มใหม่: API key สำหรับระบบอัตโนมัติของ user (ไม่ใช่ JWT ที่ต้อง login เอง)
     # เก็บแค่ hash (HMAC-SHA256 แบบเดียวกับ OTP) ไม่เก็บ plaintext — unique+index เพราะจะ query
     # หา user ตรงๆ จาก hash เลย (deterministic hash ทำให้ query ตรงได้ ไม่ต้อง loop เทียบทีละคน)

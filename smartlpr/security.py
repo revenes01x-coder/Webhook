@@ -121,6 +121,11 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 # ---------------------------------------------------------------------------
 # Dependency chain ตามลำดับที่ตกลงกันไว้:
 #   login (is_verified) -> require_terms_accepted -> require_access_approved
+#
+# หมายเหตุ: is_suspended ไม่ถูกเช็คใน get_current_user ตั้งใจ — user ที่ถูกระงับ
+# ยัง login/ดูข้อมูลของตัวเองได้ปกติ แต่จะถูกบล็อกเฉพาะตอนทำ action สำคัญ ผ่าน
+# require_access_approved (เพิ่ม webhook, ขอ/regenerate API key) และ require_api_key
+# (ระบบอัตโนมัติของ user ยิงเข้ามาเอง เช่น POST /my/cameras) เท่านั้น
 # ---------------------------------------------------------------------------
 
 def require_admin(current_user: models.User = Depends(get_current_user)) -> models.User:
@@ -147,6 +152,15 @@ def require_access_approved(
     current_user: models.User = Depends(require_terms_accepted),
     db: Session = Depends(get_db),
 ) -> models.User:
+    # [Suspend Guard]: user ที่ถูก admin ระงับ ทำ action สำคัญ (เพิ่ม webhook, ขอ/regenerate
+    # API key) ไม่ได้ ถึงแม้จะเคยผ่าน terms + access approved มาแล้วก็ตาม — login ยังทำได้ปกติ
+    # เพราะเช็คจุดนี้ ไม่ใช่ใน get_current_user
+    if current_user.is_suspended:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="บัญชีนี้ถูกระงับการใช้งานชั่วคราว กรุณาติดต่อผู้ดูแลระบบ",
+        )
+
     approved = (
         db.query(models.AccessRequest)
         .filter(
@@ -186,5 +200,14 @@ def require_api_key(
     user = db.query(models.User).filter(models.User.api_key_hash == hashed).first()
     if not user:
         raise invalid_exception
+
+    # [Suspend Guard]: user ที่ถูกระงับ ห้ามยิง API key เข้ามาเพิ่มกล้องใหม่ (POST /my/cameras)
+    # ต่างจาก invalid key ตรงที่ key ถูกต้อง แต่บัญชีถูกล็อกไว้ชั่วคราว -> 403 ไม่ใช่ 401
+    if user.is_suspended:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="บัญชีนี้ถูกระงับการใช้งานชั่วคราว",
+            headers={"WWW-Authenticate": "API-Key"},
+        )
 
     return user

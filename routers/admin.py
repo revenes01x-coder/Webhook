@@ -153,3 +153,78 @@ def set_camera_status(
     db.refresh(camera)
     return camera
 
+
+# ---------------------------------------------------------------------------
+# User — admin ดูรายชื่อ user ทั้งหมด และระงับ/ปลดระงับการใช้งานได้
+# ระงับ (is_suspended=True) ไม่บล็อก login แต่บล็อก action สำคัญ:
+# เพิ่ม webhook, ขอ/regenerate API key (require_access_approved) และ
+# การยิง API key เข้ามาเอง เช่น POST /my/cameras (require_api_key)
+# ดู smartlpr/security.py
+# ---------------------------------------------------------------------------
+
+@router.get("/users", response_model=schemas.PaginatedResponse[schemas.UserAdminResponse])
+def list_users(
+    page_params: PageParams = Depends(),
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+    """List user ทั้งหมดในระบบ รองรับ pagination ?page=&page_size= เหมือน endpoint อื่นๆ"""
+    query = db.query(models.User).order_by(models.User.id.desc())
+    return paginate(query, page_params)
+
+
+@router.get("/users/{user_id}", response_model=schemas.UserAdminDetailResponse)
+def get_user_detail(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+    """ดูรายละเอียด user คนเดียว พร้อมจำนวน webhook/camera ที่มี (ใช้ประกอบการตัดสินใจระงับ)"""
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ไม่พบผู้ใช้นี้")
+
+    webhook_count = db.query(models.WebhookEndpoint).filter(
+        models.WebhookEndpoint.user_id == user.id
+    ).count()
+    camera_count = db.query(models.Camera).filter(
+        models.Camera.owner_user_id == user.id
+    ).count()
+
+    return schemas.UserAdminDetailResponse(
+        id=user.id,
+        email=user.email,
+        is_verified=user.is_verified,
+        terms_accepted=user.terms_accepted,
+        is_admin=user.is_admin,
+        is_suspended=user.is_suspended,
+        suspended_reason=user.suspended_reason,
+        created_at=user.created_at,
+        webhook_count=webhook_count,
+        camera_count=camera_count,
+    )
+
+
+@router.patch("/users/{user_id}/suspend", response_model=schemas.UserAdminResponse)
+def set_user_suspend_status(
+    user_id: int,
+    payload: schemas.UserSuspendUpdate,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+    """ระงับ/ปลดระงับ user — ห้ามแตะบัญชีของตัวเอง (กัน admin ล็อกตัวเองไม่ได้ตั้งใจ)"""
+    if user_id == admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ไม่สามารถระงับ/ปลดระงับบัญชีของตัวเองได้",
+        )
+
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ไม่พบผู้ใช้นี้")
+
+    user.is_suspended = payload.is_suspended
+    user.suspended_reason = payload.admin_note if payload.is_suspended else None
+    db.commit()
+    db.refresh(user)
+    return user
