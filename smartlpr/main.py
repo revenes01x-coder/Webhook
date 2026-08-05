@@ -68,6 +68,14 @@ def receive_from_rtsp(
     # 2. เจ้าของกล้องคือ owner_user_id ตรงๆ (กล้องเป็นกรรมสิทธิ์ของ user คนเดียว ไม่มี many-to-many แล้ว)
     owner_user_id = camera.owner_user_id
 
+    # 2.5 [Suspend Guard]: เจ้าของกล้องถูกระงับอยู่ -> ไม่สร้าง WebhookEvent ใหม่เข้าคิวเลย
+    # (ตอบ "ignored" เงียบๆ เหมือน case อื่นในนี้ ไม่ error ให้กล้อง/สคริปต์ที่ยิง /capture-event
+    # เข้ามาต้อง handle error พิเศษ — เป็นชั้นป้องกันสำรองด้วย เผื่อกล้องบาง process ยัง capture
+    # อยู่ทันเวลาก่อนที่ camera_manager.py จะ terminate ให้ในรอบ poll ถัดไป)
+    owner = db.query(models.User).filter(models.User.id == owner_user_id).first()
+    if not owner or owner.is_suspended:
+        return {"status": "ignored", "message": "บัญชีเจ้าของกล้องนี้ถูกระงับการใช้งานอยู่ ไม่ส่งข้อมูลต่อ"}
+
     # 3. เก็บข้อมูลข้อความไว้ใน payload (path รูปเก็บแยกคนละ column)
     #    field name ตรงตามคู่มือที่แจกให้ user: license_plate, capture_time, camera_id
     #    (event_id คงชื่อเดิมไว้ตามที่ตกลง ไม่เปลี่ยนตามคู่มือที่ใช้ received_event_id)

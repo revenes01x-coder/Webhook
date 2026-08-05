@@ -33,10 +33,26 @@ logger = logging.getLogger("camera_manager")
 
 
 def get_active_cameras() -> dict[str, str]:
-    """คืน {camera_id: rtsp_url} เฉพาะกล้องที่ is_active=True"""
+    """คืน {camera_id: rtsp_url} เฉพาะกล้องที่ is_active=True และเจ้าของยังไม่ถูกระงับ
+
+    [Suspend Guard]: join กับตาราง users กรอง is_suspended=False ด้วย — พอ admin กดระงับ
+    user คนไหน กล้องที่กำลัง active/รันอยู่ของ user นั้นจะหายไปจากผลลัพธ์ทันทีในรอบ poll ถัดไป
+    (สูงสุด POLL_INTERVAL_SECONDS วิ) ทำให้ main() มองว่าเป็นกรณีเดียวกับ "กล้องถูกปิดใช้งาน"
+    (ดู main(): ข้อ 1 running_ids - active_ids -> terminate) แล้ว terminate process ให้เองอัตโนมัติ
+    ไม่ต้องรอ user เข้ามาปิดกล้องเอง — ถ้าภายหลังปลดระงับ กล้องจะกลับมา spawn ใหม่เองในรอบถัดไปเช่นกัน
+    (ตราบใดที่ Camera.is_active ยังเป็น True อยู่)
+    """
     db = SessionLocal()
     try:
-        cameras = db.query(models.Camera).filter(models.Camera.is_active == True).all()
+        cameras = (
+            db.query(models.Camera)
+            .join(models.User, models.Camera.owner_user_id == models.User.id)
+            .filter(
+                models.Camera.is_active == True,      # noqa: E712
+                models.User.is_suspended == False,     # noqa: E712
+            )
+            .all()
+        )
         # แปลงเป็น dict ธรรมดาก่อนปิด session กัน DetachedInstanceError ตอนใช้งานนอก session
         return {c.id: c.rtsp_url for c in cameras}
     finally:

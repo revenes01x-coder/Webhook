@@ -105,6 +105,19 @@ async def _send_with_semaphore(semaphore: asyncio.Semaphore, client: httpx.Async
     return event, result_type, error_msg
 
 
+def _get_suspended_user_ids(db: Session, user_ids: set) -> set:
+    """คืน set ของ user_id ที่ is_suspended=True ในกลุ่ม user_ids ที่ให้มา (query ครั้งเดียว
+    ต่อรอบ ไม่ query ทีละ event) ใช้ร่วมกันทั้ง process_webhook_queue และ process_graveyard_resume
+    เพื่อกัน event ของ user ที่ถูกระงับไม่ให้ถูกส่งออกไปจริง"""
+    if not user_ids:
+        return set()
+    rows = db.query(models.User.id).filter(
+        models.User.id.in_(user_ids),
+        models.User.is_suspended == True,  # noqa: E712
+    ).all()
+    return {uid for (uid,) in rows}
+
+
 def _mark_endpoint_outcome(endpoint: models.WebhookEndpoint, success: bool) -> bool:
     """
     Circuit breaker bookkeeping (แค่แก้ attribute เฉยๆ ไม่ commit ในนี้):
@@ -208,9 +221,19 @@ async def process_webhook_queue():
                 ).all()
             }
 
+        # [Suspend Guard]: หาว่า event ไหนเป็นของ user ที่ถูกระงับอยู่ตอนนี้บ้าง (query ครั้งเดียว)
+        suspended_user_ids = _get_suspended_user_ids(db, {e.user_id for e in events if e.user_id})
+
         # Circuit breaker: endpoint ถูกตัดไฟอยู่ -> ข้าม 3 รอบ retry ไปเลย เข้าสุสานทันที ประหยัดเวลา
         to_send = []
         for event in events:
+            if event.user_id in suspended_user_ids:
+                # เจ้าของ event ถูกระงับอยู่ -> ไม่ส่งจริง แต่ก็ไม่แตะ status/attempt_count/
+                # next_retry_at เลย ปล่อยเป็น pending/failed เหมือนเดิม รอรอบถัดไป (ทุก 30 วิ)
+                # พอ admin ปลดระงับแล้วจะถูกหยิบมาส่งต่อเองโดยอัตโนมัติ ไม่นับเป็นความล้มเหลว
+                # ของ endpoint (ไม่กระทบ circuit breaker) เพราะไม่ใช่ความผิดของปลายทาง
+                continue
+
             endpoint = endpoints_by_id.get(event.webhook_endpoint_id)
             if endpoint and not endpoint.is_healthy:
                 event.status = "dead_letter"
@@ -222,6 +245,8 @@ async def process_webhook_queue():
                 continue
             to_send.append(event)
 
+        tripped_endpoints = {}  # endpoint.id -> endpoint, กันแจ้งซ้ำถ้าหลาย event ตัดไฟ endpoint เดียวกันพร้อมกัน
+
         if to_send:
             semaphore = asyncio.Semaphore(REALTIME_CONCURRENCY)
             async with httpx.AsyncClient() as client:
@@ -229,7 +254,6 @@ async def process_webhook_queue():
                     *(_send_with_semaphore(semaphore, client, event) for event in to_send)
                 )
 
-            tripped_endpoints = {}  # endpoint.id -> endpoint, กันแจ้งซ้ำถ้าหลาย event ตัดไฟ endpoint เดียวกันพร้อมกัน
             for event, result_type, error_msg in results:
                 endpoint = endpoints_by_id.get(event.webhook_endpoint_id)
                 just_tripped = _apply_send_result(event, endpoint, result_type, error_msg)
@@ -321,6 +345,21 @@ async def process_graveyard_resume():
                     f"[Graveyard Resume] endpoint ฟื้น {len(recovered_endpoints)} ตัว "
                     f"แต่ไม่มี event ค้างในสุสาน"
                 )
+                return
+
+            # [Suspend Guard]: endpoint ฟื้นแล้วก็จริง แต่ถ้าเจ้าของ event ยังถูกระงับอยู่ ไม่ควร
+            # resume ส่งให้ — ตัดออกจากรอบนี้ไปก่อน (ยังคงเป็น dead_letter เหมือนเดิม รอ Job B
+            # รอบถัดไปตอนที่ endpoint ยังฟื้นอยู่ และเจ้าของถูกปลดระงับแล้วค่อยลองใหม่)
+            suspended_user_ids = _get_suspended_user_ids(db, {e.user_id for e in dead_events if e.user_id})
+            skipped_suspended = [e for e in dead_events if e.user_id in suspended_user_ids]
+            dead_events = [e for e in dead_events if e.user_id not in suspended_user_ids]
+
+            if skipped_suspended:
+                logging.info(
+                    f"[Graveyard Resume] ข้าม {len(skipped_suspended)} event เพราะเจ้าของถูกระงับอยู่"
+                )
+
+            if not dead_events:
                 return
 
             endpoints_by_id = {ep.id: ep for ep in recovered_endpoints}
