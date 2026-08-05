@@ -301,7 +301,7 @@ class CameraStatusUpdate(BaseModel):
 
 class MyCameraResponse(BaseModel):
     """สำหรับ GET /my/cameras — กล้องของตัวเอง ไม่โชว์ rtsp_url
-    verification_status: 'pending' = กำลังตรวจสอบ RTSP อยู่เบื้องหลัง, 'verified' = ต่อ stream ได้จริง,
+    verification_status: 'pending' = กำลังตรวจสอบอยู่เบื้องหลัง, 'verified' = ต่อ stream ได้จริง,
     'failed' = ต่อไม่ได้ (เช็ค URL อีกครั้ง)"""
     camera_id: str
     is_active: bool
@@ -318,13 +318,48 @@ class ApiKeyResponse(BaseModel):
 class ApiKeyStatusResponse(BaseModel):
     has_api_key: bool
 
-# ---- สำหรับ GET /auth/me — เช็คสถานะ user แบบ read-only (terms/admin/api-key) ----
+# ---- สำหรับ GET /auth/me — เช็คสถานะ user แบบ read-only (terms/admin/api-key/suspend) ----
 class UserMeResponse(BaseModel):
     email: str
     is_verified: bool
     terms_accepted: bool
     is_admin: bool
     has_api_key: bool
+    is_suspended: bool
+    suspended_reason: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+# ---- สำหรับ Admin: จัดการ user ----
+class UserAdminResponse(BaseModel):
+    id: int
+    email: str
+    is_verified: bool
+    terms_accepted: bool
+    is_admin: bool
+    is_suspended: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class UserAdminDetailResponse(UserAdminResponse):
+    suspended_reason: Optional[str] = None
+    webhook_count: int
+    camera_count: int
+
+
+class UserSuspendUpdate(BaseModel):
+    is_suspended: bool
+    admin_note: Optional[str] = Field(default=None, max_length=1000)
+
+    @field_validator("admin_note")
+    @classmethod
+    def strip_note(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip()
+        return v or None

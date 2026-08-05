@@ -580,6 +580,10 @@ def get_me(current_user: models.User = Depends(get_current_user)):
     ข้ามเบราว์เซอร์/เครื่องก็ยังแม่นยำ เพราะอิงจาก DB ไม่ใช่ local storage)
     ไม่มี dependency chain (ไม่ต้อง terms/access approved) เพราะจุดประสงค์คือใช้เช็ค "ก่อน" ตัดสินใจ
     เปิด terms modal หรือไม่ ถ้าบังคับ require_terms_accepted ในนี้ด้วยจะ deadlock ตรรกะ
+
+    เพิ่ม is_suspended/suspended_reason: ใช้ฝั่ง frontend แสดง suspend banner ค้างบน dashboard
+    ตราบใดที่ยังถูกระงับอยู่ (login ยัง allow ปกติ เช็คสถานะนี้ได้ก็ต่อเมื่อเข้ามาถึง dashboard
+    แล้วเรียก endpoint นี้เท่านั้น ไม่ได้เช็คตั้งแต่หน้า login form)
     """
     return schemas.UserMeResponse(
         email=current_user.email,
@@ -587,4 +591,6 @@ def get_me(current_user: models.User = Depends(get_current_user)):
         terms_accepted=current_user.terms_accepted,
         is_admin=current_user.is_admin,
         has_api_key=current_user.api_key_hash is not None,
+        is_suspended=current_user.is_suspended,
+        suspended_reason=current_user.suspended_reason,
     )

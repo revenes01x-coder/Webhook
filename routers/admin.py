@@ -8,7 +8,12 @@ from smartlpr import models
 import smartlpr.schemas as schemas
 from smartlpr.database import get_db
 from smartlpr.security import require_admin
-from services.email_service import send_access_approved_email, send_access_rejected_email
+from services.email_service import (
+    send_access_approved_email,
+    send_access_rejected_email,
+    send_account_suspended_email,
+    send_account_unsuspended_email,
+)
 from smartlpr.pagination import PageParams, paginate
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
@@ -197,4 +202,16 @@ def set_user_suspend_status(
     user.suspended_reason = payload.admin_note if payload.is_suspended else None
     db.commit()
     db.refresh(user)
+
+    # ส่งอีเมลแจ้ง user หลัง commit สำเร็จแล้วเท่านั้น (เหมือน pattern review_access_request
+    # ด้านบน) ส่งพังไม่ rollback สถานะระงับ/ปลดระงับ แค่ log error ทิ้ง
+    try:
+        if user.is_suspended:
+            send_account_suspended_email(user.email, user.suspended_reason)
+        else:
+            send_account_unsuspended_email(user.email)
+    except RuntimeError as e:
+        action = "ระงับ" if user.is_suspended else "ปลดระงับ"
+        logging.error(f"ส่งอีเมลแจ้ง{action}บัญชี user_id={user.id} ไม่สำเร็จ: {e}")
+
     return user

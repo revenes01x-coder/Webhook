@@ -14,7 +14,7 @@ Script สำหรับตั้งให้ user ที่มีอยู่�
 """
 import sys
 from smartlpr.database import SessionLocal
-import models
+from smartlpr import models
 
 
 def make_admin(email: str, revoke: bool = False) -> None:

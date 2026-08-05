@@ -94,3 +94,40 @@ def send_webhook_endpoint_unhealthy_email(to_email: str, target_url: str) -> Non
     </div>
     """
     _send_email(to_email, subject, html)
+
+
+def send_account_suspended_email(to_email: str, reason: str | None) -> None:
+    """แจ้ง user ว่าบัญชีถูกระงับ พร้อมเหตุผลถ้า admin ระบุมา (ไม่ระบุ -> ข้อความกลางๆ)
+    เรียกจาก routers/admin.py: set_user_suspend_status หลัง db.commit() สำเร็จเท่านั้น
+    (ตาม pattern เดียวกับ send_access_approved_email/send_access_rejected_email —
+    ส่งเมลพังไม่ rollback สถานะระงับ แค่ log error ทิ้ง)"""
+    subject = "แจ้งเตือน: บัญชีของท่านถูกระงับการใช้งานชั่วคราว - SmartLPR"
+    safe_reason = html_escape(reason) if reason else None
+    reason_html = (
+        f"<p><strong>เหตุผล:</strong> {safe_reason}</p>"
+        if safe_reason
+        else "<p>ไม่มีการระบุเหตุผลเพิ่มเติม</p>"
+    )
+    html = f"""
+    <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+      <p>บัญชี SmartLPR ของท่านถูกผู้ดูแลระบบระงับการใช้งานชั่วคราว</p>
+      {reason_html}
+      <p>ระหว่างที่ถูกระงับ ท่านจะไม่สามารถเพิ่ม Webhook Endpoint, ขอ/ออก API Key ใหม่, หรือ
+      เพิ่มกล้องผ่าน API ได้ (ยังเข้าสู่ระบบและดูข้อมูลเดิมของท่านได้ตามปกติ)</p>
+      <p>หากมีข้อสงสัย กรุณาติดต่อผู้ดูแลระบบเพื่อสอบถามรายละเอียดเพิ่มเติม</p>
+    </div>
+    """
+    _send_email(to_email, subject, html)
+
+
+def send_account_unsuspended_email(to_email: str) -> None:
+    """แจ้ง user ว่าบัญชีถูกปลดระงับแล้ว กลับมาใช้งานได้ปกติ
+    เรียกคู่กับ send_account_suspended_email จากจุดเดียวกัน (set_user_suspend_status)"""
+    subject = "บัญชีของท่านกลับมาใช้งานได้ตามปกติแล้ว - SmartLPR"
+    html = """
+    <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+      <p>บัญชี SmartLPR ของท่านถูกปลดระงับแล้ว และสามารถใช้งานทุกฟังก์ชันได้ตามปกติ</p>
+      <p>หากมีข้อสงสัย กรุณาติดต่อผู้ดูแลระบบเพื่อสอบถามรายละเอียดเพิ่มเติม</p>
+    </div>
+    """
+    _send_email(to_email, subject, html)
