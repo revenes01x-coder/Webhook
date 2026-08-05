@@ -132,36 +132,6 @@ def get_camera_detail(
     return camera
 
 
-@router.patch("/cameras/{camera_id}/status", response_model=schemas.CameraAdminResponse)
-def set_camera_status(
-    camera_id: str,
-    payload: schemas.CameraStatusUpdate,
-    db: Session = Depends(get_db),
-    admin: models.User = Depends(require_admin),
-):
-    """
-    เปิด/ปิดใช้งานกล้องของ user คนไหนก็ได้ (เช่น พบการใช้งานผิดกฎ)
-    พอ is_active=False แล้ว camera_manager.py จะ terminate process ของกล้องนี้เอง
-    อัตโนมัติในรอบ poll ถัดไป (สูงสุด 30 วิ) ไม่ต้องทำอะไรเพิ่ม
-    """
-    camera = db.query(models.Camera).filter(models.Camera.id == camera_id).first()
-    if not camera:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ไม่พบกล้องนี้")
-
-    camera.is_active = payload.is_active
-    db.commit()
-    db.refresh(camera)
-    return camera
-
-
-# ---------------------------------------------------------------------------
-# User — admin ดูรายชื่อ user ทั้งหมด และระงับ/ปลดระงับการใช้งานได้
-# ระงับ (is_suspended=True) ไม่บล็อก login แต่บล็อก action สำคัญ:
-# เพิ่ม webhook, ขอ/regenerate API key (require_access_approved) และ
-# การยิง API key เข้ามาเอง เช่น POST /my/cameras (require_api_key)
-# ดู smartlpr/security.py
-# ---------------------------------------------------------------------------
-
 @router.get("/users", response_model=schemas.PaginatedResponse[schemas.UserAdminResponse])
 def list_users(
     page_params: PageParams = Depends(),

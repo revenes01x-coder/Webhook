@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from smartlpr import models
 import smartlpr.schemas as schemas
 from smartlpr.database import get_db
-from smartlpr.security import get_current_user, require_api_key
+from smartlpr.security import get_current_user, require_api_key, require_access_approved
 from security.camera_url_guard import verify_camera_rtsp_url
 from services.rate_limiter import check_rate_limit
 from smartlpr.pagination import PageParams
@@ -139,3 +139,57 @@ def delete_my_camera(
     db.commit()
 
     return {"message": f"ลบกล้อง '{camera.id}' เรียบร้อยแล้ว"}
+
+@router.patch("/cameras/{camera_id}/status", response_model=schemas.MyCameraResponse)
+def set_my_camera_status(
+    camera_id: str,
+    payload: schemas.CameraStatusUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_access_approved),
+):
+    """
+    User เปิด/ปิดใช้งานกล้องของตัวเอง (เจ้าของเท่านั้น)
+    ใช้ require_access_approved เดียวกับ endpoint สำคัญอื่นๆ (webhook, api-key)
+    -> user ที่ถูก suspend จะ toggle กล้องไม่ได้ (403)
+
+    บังคับให้ verification_status ต้องเป็น "verified" แล้วเท่านั้น (ผ่าน background job
+    ต่อ RTSP จริงมาแล้ว) ถึงจะเปิด/ปิดเองได้ — กล้องที่ยังเป็น pending/failed ไม่ให้ toggle
+    เพราะยังไม่การันตีว่าลิงก์ต่อได้จริง ป้องกันการข้ามขั้นตอนตรวจสอบ
+
+    พอ is_active เปลี่ยน camera_manager.py จะ spawn/terminate process ของกล้องนี้เอง
+    อัตโนมัติในรอบ poll ถัดไป (สูงสุด 30 วิ)
+    """
+    # [Rate Limit]: toggle ได้ 20 ครั้ง / ชั่วโมง / user (กัน spam จน camera_manager.py
+    # spawn/kill process ถี่เกินไป)
+    check_rate_limit(db, f"toggle_camera_{current_user.id}", "toggle_camera", limit=20, window_minutes=60)
+
+    camera = db.query(models.Camera).filter(
+        models.Camera.id == camera_id,
+        models.Camera.owner_user_id == current_user.id,
+    ).first()
+
+    if not camera:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="ไม่พบกล้องนี้ หรือคุณไม่ใช่เจ้าของกล้องนี้",
+        )
+
+    if camera.verification_status != "verified":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"กล้องนี้ยังไม่ผ่านการตรวจสอบ RTSP (สถานะปัจจุบัน: {camera.verification_status}) "
+                "กรุณารอจนกว่าสถานะจะเป็น 'verified' ก่อนจึงจะเปิด/ปิดกล้องเองได้"
+            ),
+        )
+
+    camera.is_active = payload.is_active
+    db.commit()
+    db.refresh(camera)
+
+    return schemas.MyCameraResponse(
+        camera_id=camera.id,
+        is_active=camera.is_active,
+        verification_status=camera.verification_status,
+        created_at=camera.created_at,
+    )
