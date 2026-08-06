@@ -176,19 +176,54 @@ def register_user(user: schemas.UserCreate, request: Request, db: Session = Depe
     check_and_record(db, lockout_key, "register", limit=REGISTER_LOCKOUT_LIMIT, window_minutes=REGISTER_LOCKOUT_MINUTES)
 
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
-    if db_user:
+
+    # [Unverified resume]: อีเมลซ้ำ "และ" ยืนยันแล้ว -> บล็อกจริง (เป็นบัญชีคนอื่น/เคยสมัครสำเร็จแล้ว)
+    # อีเมลซ้ำ "แต่ยังไม่ยืนยัน" -> ไม่ถือเป็นบัญชีซ้ำ เป็นแค่ user สมัครค้างไว้แล้วไม่ได้กรอก OTP
+    # ทัน (ปิดแท็บ/รอนานเกินไป) ให้ถือเป็นการ "สมัครต่อ" แทนที่จะบังคับรอ cleanup job ลบทิ้งเอง
+    # ใน 24 ชม. (UNVERIFIED_USER_EXPIRE_HOURS) — ป้องกัน user ค้างสมัครไม่ได้ยาวนานโดยไม่จำเป็น
+    if db_user and db_user.is_verified:
         raise HTTPException(status_code=400, detail="อีเมลนี้มีในระบบแล้ว")
 
     hashed_password = get_password_hash(user.password)
-    new_user = models.User(email=user.email, hashed_password=hashed_password, is_verified=False)
-    db.add(new_user)
 
-    try:
+    if db_user:
+        # [Cooldown]: บัญชีเดิมค้างอยู่ ใช้ cooldown เดียวกับ resend-otp กันกดสมัครซ้ำรัวๆ
+        # จนสแปมอีเมล user (register เดิมไม่มี cooldown เพราะไม่เคยมีทางส่งซ้ำมาก่อนจุดนี้)
+        latest_otp = (
+            db.query(models.OtpVerification)
+            .filter(
+                models.OtpVerification.user_id == db_user.id,
+                models.OtpVerification.purpose == REGISTER_PURPOSE,
+            )
+            .first()
+        )
+        if latest_otp:
+            elapsed = (datetime.now(timezone.utc) - latest_otp.created_at).total_seconds()
+            if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
+                wait_more = int(OTP_RESEND_COOLDOWN_SECONDS - elapsed)
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail={
+                        "message": f"กรุณารออีก {wait_more} วินาทีก่อนขอ OTP ใหม่",
+                        "retry_after_seconds": max(1, wait_more),
+                    },
+                )
+
+        # อัปเดตรหัสผ่านให้ตรงกับที่กรอกล่าสุดเสมอ (เผื่อพิมพ์ผิด/จำรหัสเดิมไม่ได้ตอนสมัครครั้งแรก
+        # — ยังไม่ verify แปลว่าบัญชียังไม่ active จริง เปลี่ยนรหัสผ่านตรงนี้ได้โดยไม่ต้องยืนยันตัวตนซ้ำ)
+        db_user.hashed_password = hashed_password
         db.commit()
-        db.refresh(new_user)
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(status_code=400, detail="อีเมลนี้มีในระบบแล้ว")
+        new_user = db_user
+    else:
+        new_user = models.User(email=user.email, hashed_password=hashed_password, is_verified=False)
+        db.add(new_user)
+
+        try:
+            db.commit()
+            db.refresh(new_user)
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(status_code=400, detail="อีเมลนี้มีในระบบแล้ว")
 
     try:
         otp_record = _create_and_send_otp(db, new_user)
@@ -298,9 +333,14 @@ def resend_otp(payload: schemas.OtpResendRequest, db: Session = Depends(get_db))
         elapsed = (datetime.now(timezone.utc) - latest_otp.created_at).total_seconds()
         if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
             wait_more = int(OTP_RESEND_COOLDOWN_SECONDS - elapsed)
+            # detail เป็น dict (เหมือน check_lockout) ให้ frontend อ่าน retry_after_seconds
+            # ไปนับถอยหลัง/disable ปุ่ม "ส่ง OTP อีกครั้ง" ได้ตรงเวลาจริง แทนที่จะ parse ข้อความเอา
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"กรุณารออีก {wait_more} วินาทีก่อนขอ OTP ใหม่",
+                detail={
+                    "message": f"กรุณารออีก {wait_more} วินาทีก่อนขอ OTP ใหม่",
+                    "retry_after_seconds": max(1, wait_more),
+                },
             )
 
     try:
@@ -464,9 +504,13 @@ def forgot_password(payload: schemas.ForgotPasswordRequest, db: Session = Depend
         elapsed = (datetime.now(timezone.utc) - latest_otp.created_at).total_seconds()
         if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
             wait_more = int(OTP_RESEND_COOLDOWN_SECONDS - elapsed)
+            # เหมือนจุด cooldown ใน resend_otp ด้านบน — detail เป็น dict พร้อม retry_after_seconds
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"กรุณารออีก {wait_more} วินาทีก่อนขอ OTP ใหม่",
+                detail={
+                    "message": f"กรุณารออีก {wait_more} วินาทีก่อนขอ OTP ใหม่",
+                    "retry_after_seconds": max(1, wait_more),
+                },
             )
 
     try:

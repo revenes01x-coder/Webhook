@@ -68,7 +68,12 @@ def check_rate_limit(db: Session, key: str, action: str, limit: int, window_minu
 def check_lockout(db: Session, key: str, action: str, limit: int, window_minutes: int):
     """เช็คว่า key นี้กำลังถูกล็อกอยู่หรือไม่ (read-only ไม่เพิ่ม count)
     เรียก "ก่อน" ทำ action ทุกครั้ง — ถ้าล็อกอยู่ raise 429 ทันที ไม่ว่า action ที่จะทำต่อ
-    จะสำเร็จหรือไม่ก็ตาม (เช่น login ต้องบล็อกแม้รหัสผ่านที่กรอกมาถูกต้อง)"""
+    จะสำเร็จหรือไม่ก็ตาม (เช่น login ต้องบล็อกแม้รหัสผ่านที่กรอกมาถูกต้อง)
+
+    detail เป็น dict เสมอ (ไม่ใช่ string เปล่าๆ เหมือนเดิม) เพื่อให้ frontend อ่าน
+    retry_after_seconds ไปนับถอยหลัง/disable ปุ่มได้ตรงเวลาจริง แทนที่จะ parse ข้อความเอา
+    (ดู index.html: apiCall เก็บ e.detail ไว้ทั้งก้อน + startButtonLockout ใช้ค่านี้)
+    """
     now = datetime.now(timezone.utc)
 
     record = db.query(models.RateLimit).filter(
@@ -78,13 +83,16 @@ def check_lockout(db: Session, key: str, action: str, limit: int, window_minutes
 
     if record and now < record.expire_at and record.count >= limit:
         remaining_seconds = int((record.expire_at - now).total_seconds())
-        remaining_minutes = max(1, (remaining_seconds + 59) // 60)  # ปัดขึ้น อย่างน้อย 1 นาที
+        remaining_minutes = max(1, (remaining_seconds + 59) // 60)  # ปัดขึ้น อย่างน้อย 1 นาที (ใช้แค่ในข้อความ)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=(
-                f"ทำรายการ {action} ผิดพลาด/ถี่เกินกำหนด กรุณารออีกประมาณ "
-                f"{remaining_minutes} นาทีแล้วลองใหม่"
-            ),
+            detail={
+                "message": (
+                    f"ทำรายการ {action} ผิดพลาด/ถี่เกินกำหนด กรุณารออีกประมาณ "
+                    f"{remaining_minutes} นาทีแล้วลองใหม่"
+                ),
+                "retry_after_seconds": max(1, remaining_seconds),
+            },
         )
 
 
