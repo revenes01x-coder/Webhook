@@ -6,9 +6,13 @@ import smartlpr.schemas as schemas
 from smartlpr.database import get_db
 from smartlpr.security import get_current_user, require_access_approved
 from services.token import generate_api_key, hash_api_key
-from services.rate_limiter import check_rate_limit
+from services.rate_limiter import check_and_record
 
 router = APIRouter(prefix="/my/api-key", tags=["API Key"])
+
+# [Lockout ใหม่]: ตกลงกันไว้ = 3 ครั้ง / ล็อก 5 นาที ต่อ user
+REGEN_API_KEY_LOCKOUT_LIMIT = 3
+REGEN_API_KEY_LOCKOUT_MINUTES = 5
 
 
 @router.post("/regenerate", response_model=schemas.ApiKeyResponse)
@@ -25,9 +29,16 @@ def regenerate_api_key(
     ต้องผ่าน require_access_approved (login -> terms_accepted -> access-request ที่ admin
     อนุมัติแล้ว) เท่านั้นถึงจะขอ API key ได้ — ป้องกันไม่ให้ใครก็สมัครแล้วขอ key ยิงเข้าระบบได้ทันที
     """
-    # [Rate Limit]: regenerate ได้ 5 ครั้ง / ชั่วโมง / user (แต่ละครั้งทำให้ key เดิมใช้ไม่ได้ทันที
-    # จำกัดไว้แน่นหน่อยกันกดพลาด/สแปมจนระบบอัตโนมัติของ user เองหลุด auth ไปเรื่อยๆ)
-    check_rate_limit(db, f"regen_api_key_{current_user.id}", "regen_api_key", limit=5, window_minutes=60)
+    # [Lockout ใหม่]: regenerate ได้ 3 ครั้ง / ล็อก 5 นาที / user (แต่ละครั้งทำให้ key เดิมใช้ไม่ได้
+    # ทันที จำกัดไว้แน่นหน่อยกันกดพลาด/สแปมจนระบบอัตโนมัติของ user เองหลุด auth ไปเรื่อยๆ
+    # พอแตะ limit พอดี จะรีเซ็ตนาฬิกาเต็ม 5 นาทีนับจากตอนนั้นเลย)
+    check_and_record(
+        db,
+        f"regen_api_key_{current_user.id}",
+        "regen_api_key",
+        limit=REGEN_API_KEY_LOCKOUT_LIMIT,
+        window_minutes=REGEN_API_KEY_LOCKOUT_MINUTES,
+    )
 
     plain_key = generate_api_key()
     current_user.api_key_hash = hash_api_key(plain_key)

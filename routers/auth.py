@@ -18,7 +18,13 @@ from smartlpr.security import (
     get_current_user,
     oauth2_scheme,
 )
-from services.rate_limiter import check_rate_limit
+from services.rate_limiter import (
+    check_rate_limit,      # ของเดิม — ใช้กับ refresh_token เท่านั้นในไฟล์นี้ตอนนี้
+    check_lockout,
+    record_attempt,
+    clear_lockout,
+    check_and_record,
+)
 from services.token import generate_otp, hash_otp, verify_otp, generate_refresh_token, hash_refresh_token
 from services.email_service import send_otp_email, send_password_reset_otp_email
 from smartlpr.config import (
@@ -36,6 +42,28 @@ REGISTER_PURPOSE = "register"
 PASSWORD_RESET_PURPOSE = "password_reset"
 
 REFRESH_TOKEN_COOKIE_NAME = "refresh_token"
+
+# ---------------------------------------------------------------------------
+# Lockout constants (ของใหม่ — ล็อกเวลาเต็มตอนโดน limit แทนที่ fixed window เดิม)
+# ตกลงกันไว้: login/register/forgot_password/reset_password = 5 ครั้ง/ล็อก 5 นาที
+#            resend_otp = 3 ครั้ง/ล็อก 5 นาที
+# หมายเหตุ: verify-otp และ verify-reset-otp "ไม่แตะ" ยังใช้กลไก attempt_count/is_used
+# ในตัว OtpVerification record เดิม (มาตรฐานสำหรับป้องกันการเดา OTP อยู่แล้ว)
+# ---------------------------------------------------------------------------
+LOGIN_LOCKOUT_LIMIT = 5
+LOGIN_LOCKOUT_MINUTES = 5
+
+REGISTER_LOCKOUT_LIMIT = 5
+REGISTER_LOCKOUT_MINUTES = 5
+
+FORGOT_PASSWORD_LOCKOUT_LIMIT = 5
+FORGOT_PASSWORD_LOCKOUT_MINUTES = 5
+
+RESET_PASSWORD_LOCKOUT_LIMIT = 5
+RESET_PASSWORD_LOCKOUT_MINUTES = 5
+
+RESEND_OTP_LOCKOUT_LIMIT = 3
+RESEND_OTP_LOCKOUT_MINUTES = 5
 
 
 # ---------------------------------------------------------------------------
@@ -140,9 +168,12 @@ def _create_and_send_otp(db: Session, user: models.User, purpose: str = REGISTER
 @router.post("/register")
 def register_user(user: schemas.UserCreate, request: Request, db: Session = Depends(get_db)):
     client_ip = request.client.host
+    lockout_key = f"register_{client_ip}"
 
-    # [Rate Limit]: สมัครได้ 5 ครั้ง / ชั่วโมง / IP
-    check_rate_limit(db, f"register_{client_ip}", "register", limit=5, window_minutes=60)
+    # [Lockout ใหม่]: สมัครได้ 5 ครั้ง / ล็อก 5 นาที (นับทุกครั้งที่เรียก ไม่ว่าอีเมลจะซ้ำหรือไม่
+    # ก็ตาม — เหมือน check_rate_limit เดิมที่นับแบบไม่มีเงื่อนไข แค่เปลี่ยนคณิตศาสตร์ตอนล็อก
+    # ให้เต็ม 5 นาทีนับจากตอนแตะ limit แทนที่จะนับจากครั้งแรกที่เรียก)
+    check_and_record(db, lockout_key, "register", limit=REGISTER_LOCKOUT_LIMIT, window_minutes=REGISTER_LOCKOUT_MINUTES)
 
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
     if db_user:
@@ -176,6 +207,10 @@ def register_user(user: schemas.UserCreate, request: Request, db: Session = Depe
 
 @router.post("/verify-otp")
 def verify_otp_endpoint(payload: schemas.OtpVerifyRequest, db: Session = Depends(get_db)):
+    # หมายเหตุ: endpoint นี้ "ไม่แตะ" ตามที่ตกลงกันไว้ — ยังใช้กลไก attempt_count/is_used
+    # ในตัว OtpVerification record เดิม (พลาดครบ OTP_MAX_ATTEMPTS -> OTP ใบนั้นตายทันที
+    # ต้องกด resend-otp ขอใหม่) ซึ่งเป็นมาตรฐานสำหรับป้องกันการเดา OTP อยู่แล้ว ไม่ต้องเพิ่ม
+    # lockout ระดับ endpoint ซ้อนทับ (ดูเหตุผลที่คุยกันในแชท)
     user = db.query(models.User).filter(models.User.email == payload.email).first()
     if not user:
         raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้นี้ในระบบ")
@@ -244,14 +279,11 @@ def resend_otp(payload: schemas.OtpResendRequest, db: Session = Depends(get_db))
     if user.is_verified:
         return {"message": "บัญชีนี้ยืนยันตัวตนไปแล้ว ไม่จำเป็นต้องขอ OTP อีก"}
 
-    # [Rate limit]: ขอ resend ได้ 3 ครั้ง/ชม./อีเมล
-    check_rate_limit(
-        db,
-        f"resend_otp_{payload.email}",
-        "resend_otp",
-        limit=OTP_RESEND_LIMIT_PER_HOUR,
-        window_minutes=60,
-    )
+    lockout_key = f"resend_otp_{payload.email}"
+
+    # [Lockout ใหม่]: ขอ resend ได้ 3 ครั้ง / ล็อก 5 นาที (นับทุกครั้งที่เรียกถึงจุดนี้
+    # เฉพาะ user ที่มีอยู่จริงและยังไม่ verify เท่านั้น — ตามตำแหน่งเดิมของ check_rate_limit)
+    check_and_record(db, lockout_key, "resend_otp", limit=RESEND_OTP_LOCKOUT_LIMIT, window_minutes=RESEND_OTP_LOCKOUT_MINUTES)
 
     # [Cooldown]: ห้ามขอถี่กว่า 60 วิ ต่อครั้ง — เช็คจาก record เดียวของ (user, purpose) นี้ (มีแค่แถวเดียวเสมอ)
     latest_otp = (
@@ -293,12 +325,17 @@ def login(
     client_ip = request.client.host
 
     normalized_email = form_data.username.strip().lower()
-    rate_limit_key = f"login_fail_{normalized_email}_{client_ip}"
+    lockout_key = f"login_fail_{normalized_email}_{client_ip}"
+
+    # [Lockout ใหม่]: เช็คก่อนว่าโดนล็อกอยู่ไหม — ถ้าล็อกอยู่ บล็อกทันทีไม่ว่ารหัสผ่านที่กรอก
+    # มาจะถูกหรือผิดก็ตาม (ไม่ทัน verify_password เลยด้วยซ้ำ ประหยัด bcrypt cycle)
+    check_lockout(db, lockout_key, "login_fail", limit=LOGIN_LOCKOUT_LIMIT, window_minutes=LOGIN_LOCKOUT_MINUTES)
 
     user = db.query(models.User).filter(models.User.email == normalized_email).first()
 
     if not user or not verify_password(form_data.password, user.hashed_password):
-        check_rate_limit(db, rate_limit_key, "login_fail", limit=5, window_minutes=15)
+        # นับเฉพาะตอนพลาดเท่านั้น — พอแตะ limit พอดี จะรีเซ็ตนาฬิกาเต็ม 5 นาทีให้อัตโนมัติ
+        record_attempt(db, lockout_key, "login_fail", limit=LOGIN_LOCKOUT_LIMIT, window_minutes=LOGIN_LOCKOUT_MINUTES)
         raise HTTPException(status_code=401, detail="อีเมลหรือรหัสผ่านไม่ถูกต้อง")
 
     if not user.is_verified:
@@ -306,6 +343,9 @@ def login(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="กรุณายืนยันอีเมลด้วย OTP ก่อนเข้าสู่ระบบ",
         )
+
+    # login สำเร็จ -> ล้างประวัติพลาดทิ้ง ไม่ต้องรอ window หมดอายุเอง
+    clear_lockout(db, lockout_key, "login_fail")
 
     access_token = create_access_token(data={"sub": user.email})
 
@@ -334,6 +374,9 @@ def refresh_access_token(
     Reuse detection: ถ้า token ที่ส่งมาถูก revoke ไปแล้วก่อนหน้า (เช่น โดนขโมยไปใช้ซ้ำหลัง
     เจ้าของตัวจริง refresh ไปแล้ว หรือใครเอา cookie เก่าที่ถูกแทนที่แล้วมายิงซ้ำ) ถือเป็นสัญญาณ
     ว่า token หลุด -> revoke ทั้ง family ทันที บังคับ login ใหม่ทั้งหมดทุกอุปกรณ์
+
+    หมายเหตุ: "ไม่แตะ" — ยังใช้ check_rate_limit เดิม (fixed window) เพราะเป็นการกันสแปมยิง
+    endpoint นี้รัวๆ เท่านั้น ไม่ใช่การเดา secret (token มาจาก cookie ไม่ใช่ค่าที่ user พิมพ์เดาได้)
     """
     invalid_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -344,7 +387,7 @@ def refresh_access_token(
         raise invalid_exception
 
     client_ip = request.client.host
-    # [Rate limit]: กันยิง /auth/refresh รัวๆ — 30 ครั้ง/ชม./IP
+    # [Rate limit — ของเดิม]: กันยิง /auth/refresh รัวๆ — 30 ครั้ง/ชม./IP
     check_rate_limit(db, f"refresh_token_{client_ip}", "refresh_token", limit=30, window_minutes=60)
 
     token_hash = hash_refresh_token(refresh_token)
@@ -384,8 +427,7 @@ def refresh_access_token(
 
 # ---------------------------------------------------------------------------
 # Forgot Password — flow A: forgot-password -> verify-reset-otp -> reset-password
-# แต่ละขั้นตอนมี rate limit ของตัวเอง แยกจากกัน กันทั้งการ spam ขอ OTP,
-# การไล่เดา OTP, และการยิง reset-password รัวๆ ด้วย token ที่ขโมยมา
+# แต่ละขั้นตอนมี lockout/rate limit ของตัวเอง แยกจากกัน
 # ---------------------------------------------------------------------------
 
 @router.post("/forgot-password")
@@ -403,14 +445,11 @@ def forgot_password(payload: schemas.ForgotPasswordRequest, db: Session = Depend
         # ตอบ generic message เหมือนเดิม ไม่บอกสถานะบัญชีให้ผู้ไม่หวังดีรู้
         return generic_message
 
-    # [Rate limit]: ขอ OTP รีเซ็ตรหัสผ่านได้ 3 ครั้ง/ชม./อีเมล (เหมือน resend-otp)
-    check_rate_limit(
-        db,
-        f"forgot_password_{payload.email}",
-        "forgot_password",
-        limit=OTP_RESEND_LIMIT_PER_HOUR,
-        window_minutes=60,
-    )
+    lockout_key = f"forgot_password_{payload.email}"
+
+    # [Lockout ใหม่]: ขอ OTP รีเซ็ตรหัสผ่านได้ 5 ครั้ง / ล็อก 5 นาที (นับทุกครั้งที่เรียกถึงจุดนี้
+    # เฉพาะ user จริงที่ verify แล้วเท่านั้น — ตามตำแหน่งเดิมของ check_rate_limit)
+    check_and_record(db, lockout_key, "forgot_password", limit=FORGOT_PASSWORD_LOCKOUT_LIMIT, window_minutes=FORGOT_PASSWORD_LOCKOUT_MINUTES)
 
     # [Cooldown]: ห้ามขอถี่กว่า 60 วิ ต่อครั้ง — เช็คจาก record เดียวของ (user, purpose) นี้ (มีแค่แถวเดียวเสมอ)
     latest_otp = (
@@ -444,9 +483,12 @@ def forgot_password(payload: schemas.ForgotPasswordRequest, db: Session = Depend
 
 @router.post("/verify-reset-otp", response_model=schemas.ResetTokenResponse)
 def verify_reset_otp(payload: schemas.VerifyResetOtpRequest, request: Request, db: Session = Depends(get_db)):
+    # หมายเหตุ: endpoint นี้ "ไม่แตะ" ตามที่ตกลงกันไว้ — ยังใช้ check_rate_limit เดิม
+    # (5 ครั้ง/15 นาที ต่อ email+IP) ร่วมกับ attempt_count/is_used ในตัว OtpVerification
+    # record เอง (มาตรฐาน 2 ชั้นสำหรับป้องกันการเดา OTP อยู่แล้ว ไม่ต้องเพิ่ม lockout ซ้อน)
     client_ip = request.client.host
 
-    # [Rate limit]: กันไล่เดา OTP ถี่ๆ ผ่าน endpoint นี้ — 5 ครั้ง/15 นาที/อีเมล+IP
+    # [Rate limit — ของเดิม]: กันไล่เดา OTP ถี่ๆ ผ่าน endpoint นี้ — 5 ครั้ง/15 นาที/อีเมล+IP
     # (แยกจาก attempt_count ในตัว record เอง ซึ่งจำกัดต่อ OTP หนึ่งใบ ส่วนอันนี้จำกัดภาพรวมของ endpoint)
     check_rate_limit(
         db,
@@ -517,15 +559,11 @@ def reset_password(payload: schemas.ResetPasswordRequest, request: Request, db: 
     email = decode_password_reset_token(payload.reset_token)
 
     client_ip = request.client.host
+    lockout_key = f"reset_password_{email}_{client_ip}"
 
-    # [Rate limit]: กันยิง reset-password รัวๆ ด้วย token ที่หลุด/เดา — 5 ครั้ง/ชม./อีเมล+IP
-    check_rate_limit(
-        db,
-        f"reset_password_{email}_{client_ip}",
-        "reset_password",
-        limit=5,
-        window_minutes=60,
-    )
+    # [Lockout ใหม่]: กันยิง reset-password รัวๆ ด้วย token ที่หลุด/เดา — 5 ครั้ง / ล็อก 5 นาที
+    # / อีเมล+IP (นับทุกครั้งที่ decode token ผ่านมาถึงจุดนี้แล้ว)
+    check_and_record(db, lockout_key, "reset_password", limit=RESET_PASSWORD_LOCKOUT_LIMIT, window_minutes=RESET_PASSWORD_LOCKOUT_MINUTES)
 
     user = db.query(models.User).filter(models.User.email == email).first()
     if not user:
