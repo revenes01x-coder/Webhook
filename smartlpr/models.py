@@ -117,6 +117,12 @@ class RateLimit(Base):
     action = Column(String, nullable=False)
     count = Column(Integer, default=1)
     expire_at = Column(DateTime(timezone=True), nullable=False)
+    # --- เพิ่มใหม่: เวลาที่พลาด/เรียกครั้งล่าสุด ---
+    # ใช้แยกจาก expire_at (ซึ่งหมายถึง "lockout หมดอายุเมื่อไหร่") — ใช้เช็คว่า user เว้นว่าง
+    # ไปนานแค่ไหนจากครั้งก่อนหน้า เพื่อรีเซ็ต count กลับเป็น 1 ถ้าห่างเกิน inactivity_reset_minutes
+    # ที่ตั้งไว้ (ดู services/rate_limiter.py: record_attempt) nullable เพราะ record เก่าก่อน
+    # deploy ฟีเจอร์นี้จะไม่มีค่านี้ — record_attempt เช็ค is None ก่อนเทียบเวลาอยู่แล้ว
+    last_attempt_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class WebhookEndpoint(Base):

@@ -46,6 +46,8 @@ REFRESH_TOKEN_COOKIE_NAME = "refresh_token"
 LOGIN_LOCKOUT_LIMIT = 5
 LOGIN_LOCKOUT_MINUTES = 5
 
+LOGIN_INACTIVITY_RESET_MINUTES = 60
+
 REGISTER_LOCKOUT_LIMIT = 5
 REGISTER_LOCKOUT_MINUTES = 5
 
@@ -336,8 +338,12 @@ def login(
     user = db.query(models.User).filter(models.User.email == normalized_email).first()
 
     if not user or not verify_password(form_data.password, user.hashed_password):
-        # นับเฉพาะตอนพลาดเท่านั้น — พอแตะ limit พอดี จะรีเซ็ตนาฬิกาเต็ม 5 นาทีให้อัตโนมัติ
-        record_attempt(db, lockout_key, "login_fail", limit=LOGIN_LOCKOUT_LIMIT, window_minutes=LOGIN_LOCKOUT_MINUTES)
+        record_attempt(
+            db, lockout_key, "login_fail",
+            limit=LOGIN_LOCKOUT_LIMIT,
+            window_minutes=LOGIN_LOCKOUT_MINUTES,
+            inactivity_reset_minutes=LOGIN_INACTIVITY_RESET_MINUTES,
+        )
         raise HTTPException(status_code=401, detail="อีเมลหรือรหัสผ่านไม่ถูกต้อง")
 
     if not user.is_verified:
