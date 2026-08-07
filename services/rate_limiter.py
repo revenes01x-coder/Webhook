@@ -3,7 +3,6 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException, status
 from smartlpr import models
 
-
 def check_rate_limit(db: Session, key: str, action: str, limit: int, window_minutes: int):
     """
     [ของเดิม — ไม่แก้ไข ยังใช้กับ endpoint ที่ไม่ใช่การเดา secret]
@@ -44,26 +43,6 @@ def check_rate_limit(db: Session, key: str, action: str, limit: int, window_minu
         db.add(new_record)
 
     db.commit()
-
-
-# ---------------------------------------------------------------------------
-# Lockout-style functions (ของใหม่)
-#
-# ต่างจาก check_rate_limit ตรงที่: พอนับถึง limit พอดี -> "รีเซ็ตนาฬิกาเต็ม window_minutes
-# ใหม่นับจากวินาทีนั้นเลย" (ไม่ใช่นับต่อจากครั้งแรกที่พลาด) ทำให้ระยะเวลาที่ถูกล็อกจริงคงที่
-# เสมอไม่ว่าจะพลาดถี่หรือห่างแค่ไหนก่อนหน้า
-#
-# แยกเป็น 3 ฟังก์ชันย่อยเพื่อรองรับ 2 รูปแบบการใช้งาน:
-#
-# 1) "unconditional" (นับทุกครั้งที่เรียก ไม่สนผลลัพธ์) — ใช้ check_and_record() ตัวเดียว
-#    เหมือน check_rate_limit เดิมแต่เปลี่ยนคณิตศาสตร์ตอนล็อก
-#    ใช้กับ: register, forgot_password, reset_password, resend_otp, regenerate (api-key)
-#
-# 2) "conditional on failure" (เช็คก่อนทำ action, +1 เฉพาะตอนพลาด, เคลียร์ตอนสำเร็จ) —
-#    ใช้ check_lockout() + record_attempt() + clear_lockout() แยกกัน 3 จุดในโค้ด caller
-#    ใช้กับ: login เท่านั้น (ต้องบล็อกแม้กรอกรหัสถูกระหว่างล็อกอยู่)
-# ---------------------------------------------------------------------------
-
 
 def check_lockout(db: Session, key: str, action: str, limit: int, window_minutes: int):
     """เช็คว่า key นี้กำลังถูกล็อกอยู่หรือไม่ (read-only ไม่เพิ่ม count)
@@ -128,7 +107,6 @@ def record_attempt(db: Session, key: str, action: str, limit: int, window_minute
 
     db.commit()
 
-
 def clear_lockout(db: Session, key: str, action: str):
     """ล้าง record ทิ้ง — เรียกตอน action สำเร็จ (เช่น login ผ่าน) กัน user ที่เพิ่งพลาด
     ไม่กี่ครั้งแล้วทำถูกได้จริง ยังโดนนับสะสมค้างไว้รอบหน้าโดยไม่จำเป็น"""
@@ -137,7 +115,6 @@ def clear_lockout(db: Session, key: str, action: str):
         models.RateLimit.action == action
     ).delete(synchronize_session=False)
     db.commit()
-
 
 def check_and_record(db: Session, key: str, action: str, limit: int, window_minutes: int):
     """Convenience function สำหรับ endpoint แบบ 'unconditional counting' (นับทุกครั้งที่เรียก
