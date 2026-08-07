@@ -238,16 +238,21 @@ class ReviewDecision(BaseModel):
         return v or None  # ถ้าพิมพ์แต่ space ให้ถือว่าไม่ได้ใส่
 
 
-# ---- สำหรับ Camera — user เพิ่มกล้องของตัวเอง (เจ้าของคนเดียว, active ทันที) ----
+# ---- สำหรับ Camera — ระบบพาร์ทเนอร์เพิ่มกล้องแทน user ผ่าน API key (ดู routers/partner.py) ----
 _CAMERA_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
-class CameraSelfCreate(BaseModel):
+class PartnerCameraCreate(BaseModel):
+    """Body ของ POST /partner/cameras — ระบบพาร์ทเนอร์ (ยืนยันตัวตนด้วย X-API-Key ของ user
+    เจ้าของบัญชี) เป็นคนกำหนด camera_id เอง (ใช้ตั้งค่าฝั่งอุปกรณ์กล้องจริงได้ล่วงหน้า)
+    พร้อมระบุ webhook_url ที่จะผูกกล้องนี้ไว้ — ต้องเป็น URL ของ webhook ที่ user คนเดียวกัน
+    (เจ้าของ API key) เคยสร้างไว้แล้วผ่าน POST /webhook/add เท่านั้น (กันข้อมูลกล้องหลุด
+    ไปเข้า webhook ของ "งาน"/สัญญาอื่นที่ user คนเดียวกันดูแลอยู่โดยไม่ได้ตั้งใจ)"""
     camera_id: str = Field(
         ...,
         min_length=1,
         max_length=100,
-        description="รหัสกล้องที่คุณกำหนดเอง ใช้ตั้งค่าฝั่งอุปกรณ์กล้องจริงได้เลย ต้องไม่ซ้ำกับกล้องอื่นในระบบ",
+        description="รหัสกล้องที่กำหนดเอง ใช้ตั้งค่าฝั่งอุปกรณ์กล้องจริงได้เลย ต้องไม่ซ้ำกับกล้องอื่นในระบบ",
         examples=["cam-front-gate-01"],
     )
     camera_url: str = Field(
@@ -255,6 +260,12 @@ class CameraSelfCreate(BaseModel):
         min_length=1,
         max_length=500,
         description="ลิงก์ RTSP ของกล้อง ต้องขึ้นต้นด้วย rtsp:// เท่านั้น",
+    )
+    webhook_url: str = Field(
+        ...,
+        min_length=1,
+        max_length=2048,
+        description="URL ของ webhook (ที่เคยสร้างไว้ผ่าน POST /webhook/add) ที่จะผูกกล้องตัวนี้ไว้",
     )
 
     @field_validator("camera_id")
@@ -275,6 +286,14 @@ class CameraSelfCreate(BaseModel):
             raise ValueError("ห้ามเว้นว่าง")
         if not v.lower().startswith("rtsp://"):
             raise ValueError("ลิงก์กล้องไม่ถูกต้อง: ต้องขึ้นต้นด้วย rtsp:// เท่านั้น")
+        return v
+
+    @field_validator("webhook_url")
+    @classmethod
+    def strip_webhook_url(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("ห้ามเว้นว่าง")
         return v
 
 
@@ -300,10 +319,12 @@ class MyCameraResponse(BaseModel):
     verification_status: 'pending' = กำลังตรวจสอบอยู่เบื้องหลัง, 'verified' = ต่อ stream ได้จริง,
     'failed' = ต่อไม่ได้ (เช็ค URL อีกครั้ง)
     is_active: เปิด/ปิดใช้งานจริง — คุมโดยระบบพาร์ทเนอร์เท่านั้น (ดู routers/partner.py)
-    เจ้าของกล้องไม่มีสิทธิ์ toggle เองอีกต่อไป (endpoint PATCH เดิมถูกถอดออกแล้ว)"""
+    เจ้าของกล้องไม่มีสิทธิ์ toggle เองอีกต่อไป (endpoint PATCH เดิมถูกถอดออกแล้ว)
+    webhook_url: webhook ปลายทางที่กล้องนี้ผูกไว้ (1 กล้อง : 1 webhook เสมอ)"""
     camera_id: str
     is_active: bool
     verification_status: str
+    webhook_url: str
     created_at: datetime
 
 

@@ -28,6 +28,12 @@ class User(Base):
     # --- เพิ่มใหม่: API key สำหรับระบบอัตโนมัติของ user (ไม่ใช่ JWT ที่ต้อง login เอง)
     # เก็บแค่ hash (HMAC-SHA256 แบบเดียวกับ OTP) ไม่เก็บ plaintext — unique+index เพราะจะ query
     # หา user ตรงๆ จาก hash เลย (deterministic hash ทำให้ query ตรงได้ ไม่ต้อง loop เทียบทีละคน)
+    #
+    # หมายเหตุ (อัปเดต): key นี้เป็นตัวยืนยันตัวตนของ "ระบบพาร์ทเนอร์" ที่ user คนนี้เป็นเจ้าของ
+    # (เช่น ระบบเพื่อนที่ยิง POST /partner/cameras และ POST /partner/cameras/status เข้ามา)
+    # user คนหนึ่งใช้ key เดียวกันสำหรับทั้งเพิ่มกล้องและ toggle สถานะ — ไม่ใช่ secret กลาง
+    # ของทั้งระบบ ทำให้แต่ละพาร์ทเนอร์ (แต่ละ user) แยก scope กันชัดเจน ถ้า key ใครหลุด
+    # regenerate เฉพาะรายนั้นได้โดยไม่กระทบคนอื่น
     api_key_hash = Column(String, nullable=True, unique=True, index=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -74,17 +80,28 @@ class AccessRequest(Base):
 
 
 class Camera(Base):
-    """กล้องเป็นกรรมสิทธิ์ของ user คนเดียวเท่านั้น (ผู้เพิ่มกล้องเอง ผ่าน POST /my/cameras)
-    id เป็น string ที่ user กำหนดเอง (ไม่ใช่ auto-increment) เพื่อให้ user ตั้งค่าฝั่งอุปกรณ์กล้องจริง
-    ด้วย camera_id ที่รู้ล่วงหน้าได้เลย ไม่ต้องมา query ทีหลัง ต้อง unique ทั้งระบบ"""
+    """กล้องเป็นกรรมสิทธิ์ของ user คนเดียวเท่านั้น
+    id เป็น string ที่พาร์ทเนอร์กำหนดเอง (ไม่ใช่ auto-increment) เพื่อให้ตั้งค่าฝั่งอุปกรณ์กล้องจริง
+    ด้วย camera_id ที่รู้ล่วงหน้าได้เลย ต้อง unique ทั้งระบบ
+
+    --- เพิ่มใหม่: webhook_endpoint_id ---
+    1 กล้อง ผูกกับ webhook endpoint เดียวเท่านั้น (one-to-one จากฝั่งกล้อง, webhook 1 อัน
+    รับได้จากหลายกล้อง) กำหนดตอนสร้างกล้อง (POST /partner/cameras) โดยพาร์ทเนอร์ต้องระบุ
+    webhook_url ที่เป็นของ user (owner) คนเดียวกันเท่านั้น — ป้องกันข้อมูลกล้องรั่วไปยัง
+    webhook ของ "งาน"/"สัญญา" อื่นที่ user คนเดียวกันดูแลอยู่โดยไม่ได้ตั้งใจ
+    บังคับ nullable=False เพราะกล้องทุกตัวที่เพิ่มผ่านทางนี้ต้องรู้ปลายทางตั้งแต่สร้าง
+    ไม่มี fallback ส่งไปทุก webhook ของ user เหมือนพฤติกรรมเดิมอีกต่อไป"""
     __tablename__ = "cameras"
 
     id = Column(String, primary_key=True, index=True)
     owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     rtsp_url = Column(String, nullable=False)
 
+    webhook_endpoint_id = Column(Integer, ForeignKey("webhook_endpoints.id"), nullable=False, index=True)
+
     # is_active เริ่มเป็น False เสมอตอนสร้าง — จะเป็น True ก็ต่อเมื่อ background job
     # (verify_pending_cameras ใน worker.py) ต่อ RTSP stream จริงได้สำเร็จเท่านั้น
+    # หลังจากนั้นระบบพาร์ทเนอร์ (เจ้าของกล้อง) สั่งเปิด/ปิดต่อได้ผ่าน POST /partner/cameras/status
     is_active = Column(Boolean, default=False, nullable=False)
     # pending = รอตรวจสอบ, verified = ต่อ RTSP ได้จริง (=> is_active True), failed = ต่อไม่ได้
     verification_status = Column(String, default="pending", nullable=False, index=True)
@@ -107,7 +124,11 @@ class WebhookEndpoint(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
-    url = Column(String, nullable=False)
+    # --- เพิ่มใหม่: unique=True ---
+    # ตอนนี้ POST /partner/cameras ใช้ webhook_url ที่พาร์ทเนอร์ส่งมา ไปค้นหาว่าเป็น endpoint
+    # ของ user (จาก API key) อันไหน — ถ้า URL ซ้ำกันได้ระหว่าง user คนละคน ระบบจะเดาไม่ออก
+    # ว่าจะผูกกล้องให้ endpoint ของใคร จึงบังคับ unique ทั้งระบบ
+    url = Column(String, nullable=False, unique=True)
     is_active = Column(Boolean, default=True)
 
     # Circuit breaker: ถ้า dead_letter ติดกันครบ threshold -> is_healthy=False (ตัดไฟ)

@@ -59,7 +59,11 @@ UNVERIFIED_USER_EXPIRE_HOURS = 24
 # ---- PDPA: ลบข้อมูลป้ายทะเบียน (WebhookEvent + รูปภาพ) ที่เก่าเกินกำหนดออกจากระบบ ----
 PLATE_DATA_RETENTION_DAYS = 30
 
-PARTNER_WEBHOOK_SECRET = _require("PARTNER_WEBHOOK_SECRET")
+# หมายเหตุ: Partner Integration (POST /partner/cameras, POST /partner/cameras/status)
+# ไม่ใช้ secret กลางแบบเดิมแล้ว — เปลี่ยนไปยืนยันตัวตนด้วย API key ต่อ user (X-API-Key,
+# ระบบเดิมที่มีอยู่แล้ว ดู smartlpr/security.py: require_api_key) เพื่อรองรับหลายพาร์ทเนอร์
+# พร้อมกันโดยแยก scope กันชัดเจน จึงไม่ต้องมี PARTNER_WEBHOOK_SECRET ใน .env อีกต่อไป
+
 
 PLATE_DETECTION_REPO_PATH = os.getenv("PLATE_DETECTION_REPO_PATH")
 PLATE_OCR_MODEL_PATH = os.getenv("PLATE_OCR_MODEL_PATH")

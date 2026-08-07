@@ -1,44 +1,90 @@
-import secrets
-
-from fastapi import APIRouter, Depends, HTTPException, Header, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from smartlpr import models
 import smartlpr.schemas as schemas
 from smartlpr.database import get_db
-from smartlpr.config import PARTNER_WEBHOOK_SECRET
+from smartlpr.security import require_api_key
+from security.camera_url_guard import verify_camera_rtsp_url
+from services.rate_limiter import check_rate_limit
 
 router = APIRouter(prefix="/partner", tags=["Partner Integration"])
 
+@router.post("/cameras", response_model=schemas.MyCameraResponse)
+def add_camera_from_partner(
+    payload: schemas.PartnerCameraCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_api_key),
+):
+  
+    # [Rate Limit]: เพิ่มกล้องได้ 5 ตัว / ชั่วโมง / user (กันสแปม/API key หลุดแล้วโดนยิงรัว)
+    check_rate_limit(db, f"partner_add_camera_{current_user.id}", "partner_add_camera", limit=5, window_minutes=60)
 
-def verify_partner_secret(x_partner_secret: str = Header(..., description="Secret key ที่ตกลงกันไว้กับระบบพาร์ทเนอร์")):
-    """
-    เช็ค header X-Partner-Secret เทียบกับ PARTNER_WEBHOOK_SECRET ใน .env
-    ใช้ secrets.compare_digest กัน timing attack (เหมือน pattern hmac.compare_digest
-    ที่ใช้เทียบ OTP/refresh token ในระบบ — ตรงนี้เทียบ string ตรงๆ เพราะเป็น shared secret
-    ไม่ใช่ hash)
-
-    ไม่ผูกกับ user/JWT/API key ใดๆ เพราะ endpoint นี้เป็นการสื่อสารระหว่างระบบพาร์ทเนอร์กับ
-    เซิร์ฟเวอร์เราโดยตรง (server-to-server) ไม่มี "เจ้าของบัญชี" มาเกี่ยวข้องในจังหวะนี้
-    """
-    if not secrets.compare_digest(x_partner_secret, PARTNER_WEBHOOK_SECRET):
+    existing_id = db.query(models.Camera).filter(models.Camera.id == payload.camera_id).first()
+    if existing_id:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Secret key ไม่ถูกต้อง",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"camera_id '{payload.camera_id}' ถูกใช้ไปแล้ว กรุณาตั้งชื่ออื่น",
         )
+
+    existing_url = db.query(models.Camera).filter(models.Camera.rtsp_url == payload.camera_url).first()
+    if existing_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ลิงก์กล้องไม่ถูกต้อง: ลิงก์นี้ถูกเพิ่มเข้าระบบไปแล้ว",
+        )
+
+    webhook = db.query(models.WebhookEndpoint).filter(
+        models.WebhookEndpoint.url == payload.webhook_url,
+        models.WebhookEndpoint.user_id == current_user.id,
+    ).first()
+    if not webhook:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "ไม่พบ webhook_url นี้ในบัญชีของคุณ กรุณาสร้าง webhook ก่อนผ่าน POST /webhook/add "
+                "แล้วใช้ URL เดียวกันมาผูกกับกล้อง"
+            ),
+        )
+
+    verify_camera_rtsp_url(payload.camera_url)
+
+    new_camera = models.Camera(
+        id=payload.camera_id,
+        owner_user_id=current_user.id,
+        rtsp_url=payload.camera_url,
+        webhook_endpoint_id=webhook.id,
+        is_active=False,               # จะเป็น True ก็ต่อเมื่อ background job verify สำเร็จ
+        verification_status="pending",
+    )
+    db.add(new_camera)
+    db.commit()
+    db.refresh(new_camera)
+
+    return schemas.MyCameraResponse(
+        camera_id=new_camera.id,
+        is_active=new_camera.is_active,
+        verification_status=new_camera.verification_status,
+        webhook_url=webhook.url,
+        created_at=new_camera.created_at,
+    )
 
 
 @router.post("/cameras/status")
 def update_camera_status_from_partner(
     payload: schemas.PartnerCameraStatusUpdate,
     db: Session = Depends(get_db),
-    _: None = Depends(verify_partner_secret),
+    current_user: models.User = Depends(require_api_key),
 ):
-    camera = db.query(models.Camera).filter(models.Camera.id == payload.camera_id).first()
+
+    camera = db.query(models.Camera).filter(
+        models.Camera.id == payload.camera_id,
+        models.Camera.owner_user_id == current_user.id,
+    ).first()
     if not camera:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"ไม่พบกล้อง camera_id='{payload.camera_id}' ในระบบ",
+            detail=f"ไม่พบกล้อง camera_id='{payload.camera_id}' ในบัญชีของคุณ",
         )
 
     if payload.is_active and camera.verification_status != "verified":

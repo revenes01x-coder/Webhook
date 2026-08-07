@@ -89,32 +89,33 @@ def receive_from_rtsp(
         "capture_time": timestamp,
     }
 
-    # 4. หา WebhookEndpoint ที่ active ของเจ้าของกล้อง -> สร้าง WebhookEvent ลงคิว
-    #    หนึ่ง event ต่อหนึ่ง endpoint ของเจ้าของกล้องคนนี้
-    active_endpoints = db.query(models.WebhookEndpoint).filter(
-        models.WebhookEndpoint.user_id == owner_user_id,
+    # 4. หา WebhookEndpoint ที่กล้องตัวนี้ผูกไว้ (Camera.webhook_endpoint_id) -> สร้าง
+    #    WebhookEvent ลงคิว 1 event ต่อ 1 กล้อง/1 การตรวจจับเท่านั้น (เปลี่ยนจากเดิมที่
+    #    fan-out ไปทุก active webhook ของเจ้าของกล้อง — ตอนนี้ 1 กล้อง ผูกกับ webhook
+    #    เดียวเสมอตั้งแต่ตอนสร้าง ผ่าน POST /partner/cameras ดู smartlpr/models.py: Camera)
+    endpoint = db.query(models.WebhookEndpoint).filter(
+        models.WebhookEndpoint.id == camera.webhook_endpoint_id,
         models.WebhookEndpoint.is_active == True
-    ).all()
+    ).first()
 
-    if not active_endpoints:
-        return {"status": "ignored", "message": "เจ้าของกล้องนี้ยังไม่ได้ตั้งค่า Webhook URL"}
+    if not endpoint:
+        return {"status": "ignored", "message": "Webhook ที่กล้องนี้ผูกไว้ถูกปิดใช้งานอยู่"}
 
-    for endpoint in active_endpoints:
-        new_event = models.WebhookEvent(
-            id=f"{event_id}_{endpoint.id}",  # ทำให้ ID ไม่ซ้ำ (primary key)
-            source_event_id=event_id,        # event_id ต้นฉบับ ใช้ verify ACK
-            user_id=owner_user_id,
-            camera_id=camera_id,
-            webhook_endpoint_id=endpoint.id,
-            target_url=endpoint.url,
-            payload=text_payload,
-            full_image_path=full_image_path,
-            crop_image_path=crop_image_path,
-            status="pending",
-            attempt_count=0,
-            next_retry_at=datetime.now(timezone.utc)  # สั่งให้ทำทันที
-        )
-        db.add(new_event)
+    new_event = models.WebhookEvent(
+        id=f"{event_id}_{endpoint.id}",  # ทำให้ ID ไม่ซ้ำ (primary key)
+        source_event_id=event_id,        # event_id ต้นฉบับ ใช้ verify ACK
+        user_id=owner_user_id,
+        camera_id=camera_id,
+        webhook_endpoint_id=endpoint.id,
+        target_url=endpoint.url,
+        payload=text_payload,
+        full_image_path=full_image_path,
+        crop_image_path=crop_image_path,
+        status="pending",
+        attempt_count=0,
+        next_retry_at=datetime.now(timezone.utc)  # สั่งให้ทำทันที
+    )
+    db.add(new_event)
 
     try:
         db.commit()
