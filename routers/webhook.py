@@ -10,14 +10,6 @@ from smartlpr.pagination import PageParams, paginate
 
 router = APIRouter(prefix="/webhook", tags=["Webhook Management"])
 
-# เปลี่ยนจาก get_current_user -> require_access_approved แล้ว (step 3 พร้อมใช้งาน)
-# dependency chain: login (is_verified) -> require_terms_accepted -> require_access_approved
-
-# หมายเหตุ: ตัด POST /webhook/resend/{event_id} ออกแล้ว — ระบบ circuit breaker +
-# process_graveyard_resume (worker.py) จัดการ resume event ที่ตกสุสานให้อัตโนมัติทุก 30 นาที
-# ไม่ต้องให้ user กดเองอีกต่อไป
-
-
 @router.post("/add", response_model=schemas.WebhookResponse)
 def add_webhook(
     webhook: schemas.WebhookCreate,
@@ -54,8 +46,6 @@ def list_my_webhooks(
     List webhook endpoint ทั้งหมดของตัวเอง พร้อมสถานะ circuit breaker
     (is_healthy, consecutive_dead_letters) — ใช้ทำ dashboard ดูภาพรวมว่า endpoint ไหน
     กำลังมีปัญหา/ถูกตัดไฟอยู่บ้าง
-
-    รองรับ pagination ผ่าน query param ?page=&page_size= (ดีฟอลต์ page=1, page_size=20)
     """
     query = (
         db.query(models.WebhookEndpoint)

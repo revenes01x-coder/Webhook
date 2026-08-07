@@ -364,21 +364,6 @@ def refresh_access_token(
     db: Session = Depends(get_db),
     refresh_token: str | None = Cookie(default=None, alias=REFRESH_TOKEN_COOKIE_NAME),
 ):
-    """
-    ออก access token ใบใหม่จาก refresh token ใน httpOnly cookie — เรียกตอนแอปโหลดขึ้นมาใหม่
-    (เช่น กด refresh หน้าเว็บ) หรือตอน access token หมดอายุ (15 นาที) แทนที่จะบังคับ login ใหม่
-    Frontend ต้องเรียกด้วย credentials ที่แนบ cookie ไปด้วยเสมอ (เช่น fetch(..., {credentials: "include"}))
-
-    Rotate ทุกครั้งที่เรียกสำเร็จ: refresh token ใบเก่าถูก revoke ทันที ออกใบใหม่แทนที่ใน cookie
-    (ใน family เดิม) ป้องกัน token ใบเดียวถูกใช้ซ้ำได้ไม่จำกัดจนกว่าจะหมดอายุ
-
-    Reuse detection: ถ้า token ที่ส่งมาถูก revoke ไปแล้วก่อนหน้า (เช่น โดนขโมยไปใช้ซ้ำหลัง
-    เจ้าของตัวจริง refresh ไปแล้ว หรือใครเอา cookie เก่าที่ถูกแทนที่แล้วมายิงซ้ำ) ถือเป็นสัญญาณ
-    ว่า token หลุด -> revoke ทั้ง family ทันที บังคับ login ใหม่ทั้งหมดทุกอุปกรณ์
-
-    หมายเหตุ: "ไม่แตะ" — ยังใช้ check_rate_limit เดิม (fixed window) เพราะเป็นการกันสแปมยิง
-    endpoint นี้รัวๆ เท่านั้น ไม่ใช่การเดา secret (token มาจาก cookie ไม่ใช่ค่าที่ user พิมพ์เดาได้)
-    """
     invalid_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Refresh token ไม่ถูกต้องหรือหมดอายุ กรุณาเข้าสู่ระบบใหม่อีกครั้ง",
