@@ -43,13 +43,6 @@ PASSWORD_RESET_PURPOSE = "password_reset"
 
 REFRESH_TOKEN_COOKIE_NAME = "refresh_token"
 
-# ---------------------------------------------------------------------------
-# Lockout constants (ของใหม่ — ล็อกเวลาเต็มตอนโดน limit แทนที่ fixed window เดิม)
-# ตกลงกันไว้: login/register/forgot_password/reset_password = 5 ครั้ง/ล็อก 5 นาที
-#            resend_otp = 3 ครั้ง/ล็อก 5 นาที
-# หมายเหตุ: verify-otp และ verify-reset-otp "ไม่แตะ" ยังใช้กลไก attempt_count/is_used
-# ในตัว OtpVerification record เดิม (มาตรฐานสำหรับป้องกันการเดา OTP อยู่แล้ว)
-# ---------------------------------------------------------------------------
 LOGIN_LOCKOUT_LIMIT = 5
 LOGIN_LOCKOUT_MINUTES = 5
 
@@ -65,10 +58,6 @@ RESET_PASSWORD_LOCKOUT_MINUTES = 5
 RESEND_OTP_LOCKOUT_LIMIT = 3
 RESEND_OTP_LOCKOUT_MINUTES = 5
 
-
-# ---------------------------------------------------------------------------
-# Refresh Token helpers — ใช้ร่วมกันระหว่าง login / refresh / logout
-# ---------------------------------------------------------------------------
 
 def _issue_refresh_token(db: Session, user: models.User, family_id: str | None = None) -> str:
     """สร้าง refresh token ใหม่ 1 ใบ คืน plaintext ให้ caller เอาไปตั้ง cook (เก็บแค่ hash ลง DB)
@@ -91,7 +80,6 @@ def _issue_refresh_token(db: Session, user: models.User, family_id: str | None =
 
     return plain_token
 
-
 def _set_refresh_cookie(response: Response, plain_token: str) -> None:
     response.set_cookie(
         key=REFRESH_TOKEN_COOKIE_NAME,
@@ -103,10 +91,8 @@ def _set_refresh_cookie(response: Response, plain_token: str) -> None:
         path="/auth",
     )
 
-
 def _clear_refresh_cookie(response: Response) -> None:
     response.delete_cookie(key=REFRESH_TOKEN_COOKIE_NAME, path="/auth")
-
 
 def _revoke_token_family(db: Session, family_id: str) -> None:
     """Revoke refresh token ทุกใบใน family นี้ที่ยังไม่ถูก revoke — ใช้ตอนตรวจพบการ reuse
@@ -116,7 +102,6 @@ def _revoke_token_family(db: Session, family_id: str) -> None:
         models.RefreshToken.is_revoked == False,  # noqa: E712
     ).update({"is_revoked": True}, synchronize_session=False)
     db.commit()
-
 
 def _create_and_send_otp(db: Session, user: models.User, purpose: str = REGISTER_PURPOSE) -> models.OtpVerification:
     """สร้าง/เขียนทับ OTP ของ (user, purpose) นี้ แล้วส่งอีเมล
@@ -164,31 +149,21 @@ def _create_and_send_otp(db: Session, user: models.User, purpose: str = REGISTER
 
     return otp_record
 
-
 @router.post("/register")
 def register_user(user: schemas.UserCreate, request: Request, db: Session = Depends(get_db)):
     client_ip = request.client.host
     lockout_key = f"register_{client_ip}"
 
-    # [Lockout ใหม่]: สมัครได้ 5 ครั้ง / ล็อก 5 นาที (นับทุกครั้งที่เรียก ไม่ว่าอีเมลจะซ้ำหรือไม่
-    # ก็ตาม — เหมือน check_rate_limit เดิมที่นับแบบไม่มีเงื่อนไข แค่เปลี่ยนคณิตศาสตร์ตอนล็อก
-    # ให้เต็ม 5 นาทีนับจากตอนแตะ limit แทนที่จะนับจากครั้งแรกที่เรียก)
     check_and_record(db, lockout_key, "register", limit=REGISTER_LOCKOUT_LIMIT, window_minutes=REGISTER_LOCKOUT_MINUTES)
 
     db_user = db.query(models.User).filter(models.User.email == user.email).first()
 
-    # [Unverified resume]: อีเมลซ้ำ "และ" ยืนยันแล้ว -> บล็อกจริง (เป็นบัญชีคนอื่น/เคยสมัครสำเร็จแล้ว)
-    # อีเมลซ้ำ "แต่ยังไม่ยืนยัน" -> ไม่ถือเป็นบัญชีซ้ำ เป็นแค่ user สมัครค้างไว้แล้วไม่ได้กรอก OTP
-    # ทัน (ปิดแท็บ/รอนานเกินไป) ให้ถือเป็นการ "สมัครต่อ" แทนที่จะบังคับรอ cleanup job ลบทิ้งเอง
-    # ใน 24 ชม. (UNVERIFIED_USER_EXPIRE_HOURS) — ป้องกัน user ค้างสมัครไม่ได้ยาวนานโดยไม่จำเป็น
     if db_user and db_user.is_verified:
         raise HTTPException(status_code=400, detail="อีเมลนี้มีในระบบแล้ว")
 
     hashed_password = get_password_hash(user.password)
 
     if db_user:
-        # [Cooldown]: บัญชีเดิมค้างอยู่ ใช้ cooldown เดียวกับ resend-otp กันกดสมัครซ้ำรัวๆ
-        # จนสแปมอีเมล user (register เดิมไม่มี cooldown เพราะไม่เคยมีทางส่งซ้ำมาก่อนจุดนี้)
         latest_otp = (
             db.query(models.OtpVerification)
             .filter(
@@ -239,13 +214,8 @@ def register_user(user: schemas.UserCreate, request: Request, db: Session = Depe
         "otp_expires_in_seconds": OTP_EXPIRE_MINUTES * 60,
     }
 
-
 @router.post("/verify-otp")
 def verify_otp_endpoint(payload: schemas.OtpVerifyRequest, db: Session = Depends(get_db)):
-    # หมายเหตุ: endpoint นี้ "ไม่แตะ" ตามที่ตกลงกันไว้ — ยังใช้กลไก attempt_count/is_used
-    # ในตัว OtpVerification record เดิม (พลาดครบ OTP_MAX_ATTEMPTS -> OTP ใบนั้นตายทันที
-    # ต้องกด resend-otp ขอใหม่) ซึ่งเป็นมาตรฐานสำหรับป้องกันการเดา OTP อยู่แล้ว ไม่ต้องเพิ่ม
-    # lockout ระดับ endpoint ซ้อนทับ (ดูเหตุผลที่คุยกันในแชท)
     user = db.query(models.User).filter(models.User.email == payload.email).first()
     if not user:
         raise HTTPException(status_code=404, detail="ไม่พบผู้ใช้นี้ในระบบ")
@@ -303,12 +273,10 @@ def verify_otp_endpoint(payload: schemas.OtpVerifyRequest, db: Session = Depends
 
     return {"message": "ยืนยันตัวตนสำเร็จ สามารถเข้าสู่ระบบได้แล้ว"}
 
-
 @router.post("/resend-otp")
 def resend_otp(payload: schemas.OtpResendRequest, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == payload.email).first()
     if not user:
-        # ไม่บอกตรงๆ ว่าอีเมลนี้ไม่มีในระบบ เพื่อกัน user enumeration
         return {"message": "หากอีเมลนี้อยู่ในระบบ เราได้ส่ง OTP ใหม่ไปให้แล้ว"}
 
     if user.is_verified:
@@ -316,11 +284,8 @@ def resend_otp(payload: schemas.OtpResendRequest, db: Session = Depends(get_db))
 
     lockout_key = f"resend_otp_{payload.email}"
 
-    # [Lockout ใหม่]: ขอ resend ได้ 3 ครั้ง / ล็อก 5 นาที (นับทุกครั้งที่เรียกถึงจุดนี้
-    # เฉพาะ user ที่มีอยู่จริงและยังไม่ verify เท่านั้น — ตามตำแหน่งเดิมของ check_rate_limit)
     check_and_record(db, lockout_key, "resend_otp", limit=RESEND_OTP_LOCKOUT_LIMIT, window_minutes=RESEND_OTP_LOCKOUT_MINUTES)
 
-    # [Cooldown]: ห้ามขอถี่กว่า 60 วิ ต่อครั้ง — เช็คจาก record เดียวของ (user, purpose) นี้ (มีแค่แถวเดียวเสมอ)
     latest_otp = (
         db.query(models.OtpVerification)
         .filter(
@@ -354,7 +319,6 @@ def resend_otp(payload: schemas.OtpResendRequest, db: Session = Depends(get_db))
         "otp_expires_in_seconds": OTP_EXPIRE_MINUTES * 60,
     }
 
-
 @router.post("/login", response_model=schemas.Token)
 def login(
     request: Request,
@@ -367,8 +331,6 @@ def login(
     normalized_email = form_data.username.strip().lower()
     lockout_key = f"login_fail_{normalized_email}_{client_ip}"
 
-    # [Lockout ใหม่]: เช็คก่อนว่าโดนล็อกอยู่ไหม — ถ้าล็อกอยู่ บล็อกทันทีไม่ว่ารหัสผ่านที่กรอก
-    # มาจะถูกหรือผิดก็ตาม (ไม่ทัน verify_password เลยด้วยซ้ำ ประหยัด bcrypt cycle)
     check_lockout(db, lockout_key, "login_fail", limit=LOGIN_LOCKOUT_LIMIT, window_minutes=LOGIN_LOCKOUT_MINUTES)
 
     user = db.query(models.User).filter(models.User.email == normalized_email).first()
@@ -394,7 +356,6 @@ def login(
     _set_refresh_cookie(response, plain_refresh_token)
 
     return {"access_token": access_token, "token_type": "bearer"}
-
 
 @router.post("/refresh", response_model=schemas.Token)
 def refresh_access_token(
@@ -427,7 +388,6 @@ def refresh_access_token(
         raise invalid_exception
 
     client_ip = request.client.host
-    # [Rate limit — ของเดิม]: กันยิง /auth/refresh รัวๆ — 30 ครั้ง/ชม./IP
     check_rate_limit(db, f"refresh_token_{client_ip}", "refresh_token", limit=30, window_minutes=60)
 
     token_hash = hash_refresh_token(refresh_token)
@@ -464,34 +424,21 @@ def refresh_access_token(
     new_access_token = create_access_token(data={"sub": user.email})
     return {"access_token": new_access_token, "token_type": "bearer"}
 
-
-# ---------------------------------------------------------------------------
-# Forgot Password — flow A: forgot-password -> verify-reset-otp -> reset-password
-# แต่ละขั้นตอนมี lockout/rate limit ของตัวเอง แยกจากกัน
-# ---------------------------------------------------------------------------
-
 @router.post("/forgot-password")
 def forgot_password(payload: schemas.ForgotPasswordRequest, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.email == payload.email).first()
-
     generic_message = {"message": "หากอีเมลนี้อยู่ในระบบ เราได้ส่ง OTP สำหรับตั้งรหัสผ่านใหม่ไปให้แล้ว"}
 
     if not user:
-        # ไม่บอกตรงๆ ว่าอีเมลนี้ไม่มีในระบบ เพื่อกัน user enumeration (เหมือน resend-otp)
         return generic_message
 
     if not user.is_verified:
-        # บัญชีที่ยังไม่ verify ไม่มีทางตั้งรหัสผ่านใหม่ได้อยู่แล้ว (login ไม่ได้ตั้งแต่แรก)
-        # ตอบ generic message เหมือนเดิม ไม่บอกสถานะบัญชีให้ผู้ไม่หวังดีรู้
         return generic_message
 
     lockout_key = f"forgot_password_{payload.email}"
 
-    # [Lockout ใหม่]: ขอ OTP รีเซ็ตรหัสผ่านได้ 5 ครั้ง / ล็อก 5 นาที (นับทุกครั้งที่เรียกถึงจุดนี้
-    # เฉพาะ user จริงที่ verify แล้วเท่านั้น — ตามตำแหน่งเดิมของ check_rate_limit)
     check_and_record(db, lockout_key, "forgot_password", limit=FORGOT_PASSWORD_LOCKOUT_LIMIT, window_minutes=FORGOT_PASSWORD_LOCKOUT_MINUTES)
 
-    # [Cooldown]: ห้ามขอถี่กว่า 60 วิ ต่อครั้ง — เช็คจาก record เดียวของ (user, purpose) นี้ (มีแค่แถวเดียวเสมอ)
     latest_otp = (
         db.query(models.OtpVerification)
         .filter(
@@ -504,7 +451,6 @@ def forgot_password(payload: schemas.ForgotPasswordRequest, db: Session = Depend
         elapsed = (datetime.now(timezone.utc) - latest_otp.created_at).total_seconds()
         if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
             wait_more = int(OTP_RESEND_COOLDOWN_SECONDS - elapsed)
-            # เหมือนจุด cooldown ใน resend_otp ด้านบน — detail เป็น dict พร้อม retry_after_seconds
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail={
@@ -524,16 +470,11 @@ def forgot_password(payload: schemas.ForgotPasswordRequest, db: Session = Depend
         "otp_expires_in_seconds": OTP_EXPIRE_MINUTES * 60,
     }
 
-
 @router.post("/verify-reset-otp", response_model=schemas.ResetTokenResponse)
 def verify_reset_otp(payload: schemas.VerifyResetOtpRequest, request: Request, db: Session = Depends(get_db)):
-    # หมายเหตุ: endpoint นี้ "ไม่แตะ" ตามที่ตกลงกันไว้ — ยังใช้ check_rate_limit เดิม
-    # (5 ครั้ง/15 นาที ต่อ email+IP) ร่วมกับ attempt_count/is_used ในตัว OtpVerification
-    # record เอง (มาตรฐาน 2 ชั้นสำหรับป้องกันการเดา OTP อยู่แล้ว ไม่ต้องเพิ่ม lockout ซ้อน)
+
     client_ip = request.client.host
 
-    # [Rate limit — ของเดิม]: กันไล่เดา OTP ถี่ๆ ผ่าน endpoint นี้ — 5 ครั้ง/15 นาที/อีเมล+IP
-    # (แยกจาก attempt_count ในตัว record เอง ซึ่งจำกัดต่อ OTP หนึ่งใบ ส่วนอันนี้จำกัดภาพรวมของ endpoint)
     check_rate_limit(
         db,
         f"verify_reset_otp_{payload.email}_{client_ip}",
@@ -605,8 +546,6 @@ def reset_password(payload: schemas.ResetPasswordRequest, request: Request, db: 
     client_ip = request.client.host
     lockout_key = f"reset_password_{email}_{client_ip}"
 
-    # [Lockout ใหม่]: กันยิง reset-password รัวๆ ด้วย token ที่หลุด/เดา — 5 ครั้ง / ล็อก 5 นาที
-    # / อีเมล+IP (นับทุกครั้งที่ decode token ผ่านมาถึงจุดนี้แล้ว)
     check_and_record(db, lockout_key, "reset_password", limit=RESET_PASSWORD_LOCKOUT_LIMIT, window_minutes=RESET_PASSWORD_LOCKOUT_MINUTES)
 
     user = db.query(models.User).filter(models.User.email == email).first()
@@ -616,8 +555,6 @@ def reset_password(payload: schemas.ResetPasswordRequest, request: Request, db: 
     user.hashed_password = get_password_hash(payload.new_password)
     db.commit()
 
-    # เปลี่ยนรหัสผ่านแล้ว ถือว่า session เก่าทั้งหมดไม่ควรใช้ต่อได้ (เผื่อรหัสผ่านหลุดไปพร้อม
-    # refresh token เก่า) revoke refresh token ทุกใบของ user คนนี้ที่ยังไม่ revoke
     active_families = (
         db.query(models.RefreshToken.family_id)
         .filter(
@@ -656,17 +593,7 @@ def logout(
 
 @router.get("/me", response_model=schemas.UserMeResponse)
 def get_me(current_user: models.User = Depends(get_current_user)):
-    """
-    เช็คสถานะบัญชีตัวเองแบบ read-only — ใช้แทนการเดาจาก localStorage ฝั่ง frontend
-    (เช่น terms gate ไม่ต้องเด้ง modal ซ้ำถ้าเช็คจาก endpoint นี้แล้วว่า terms_accepted=True จริง
-    ข้ามเบราว์เซอร์/เครื่องก็ยังแม่นยำ เพราะอิงจาก DB ไม่ใช่ local storage)
-    ไม่มี dependency chain (ไม่ต้อง terms/access approved) เพราะจุดประสงค์คือใช้เช็ค "ก่อน" ตัดสินใจ
-    เปิด terms modal หรือไม่ ถ้าบังคับ require_terms_accepted ในนี้ด้วยจะ deadlock ตรรกะ
-
-    เพิ่ม is_suspended/suspended_reason: ใช้ฝั่ง frontend แสดง suspend banner ค้างบน dashboard
-    ตราบใดที่ยังถูกระงับอยู่ (login ยัง allow ปกติ เช็คสถานะนี้ได้ก็ต่อเมื่อเข้ามาถึง dashboard
-    แล้วเรียก endpoint นี้เท่านั้น ไม่ได้เช็คตั้งแต่หน้า login form)
-    """
+    
     return schemas.UserMeResponse(
         email=current_user.email,
         is_verified=current_user.is_verified,

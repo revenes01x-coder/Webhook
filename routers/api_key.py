@@ -20,18 +20,6 @@ def regenerate_api_key(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_access_approved),
 ):
-    """
-    ออก API key ใหม่ให้ user คนนี้ — เขียนทับของเดิมเสมอ (ใช้ endpoint เดียวกันทั้งตอน
-    generate ครั้งแรกและตอน regenerate ทีหลัง) API key เก่าใช้ไม่ได้ทันทีที่กดปุ่มนี้
-    เก็บแค่ hash ลง DB — plaintext จะแสดงให้เห็น "ครั้งเดียว" ในการตอบกลับนี้เท่านั้น
-    ถ้าพลาดไม่ได้บันทึกไว้ ต้องกดขอใหม่อีกรอบ (ดูค่าเดิมย้อนหลังไม่ได้)
-
-    ต้องผ่าน require_access_approved (login -> terms_accepted -> access-request ที่ admin
-    อนุมัติแล้ว) เท่านั้นถึงจะขอ API key ได้ — ป้องกันไม่ให้ใครก็สมัครแล้วขอ key ยิงเข้าระบบได้ทันที
-    """
-    # [Lockout ใหม่]: regenerate ได้ 3 ครั้ง / ล็อก 5 นาที / user (แต่ละครั้งทำให้ key เดิมใช้ไม่ได้
-    # ทันที จำกัดไว้แน่นหน่อยกันกดพลาด/สแปมจนระบบอัตโนมัติของ user เองหลุด auth ไปเรื่อยๆ
-    # พอแตะ limit พอดี จะรีเซ็ตนาฬิกาเต็ม 5 นาทีนับจากตอนนั้นเลย)
     check_and_record(
         db,
         f"regen_api_key_{current_user.id}",
@@ -45,7 +33,6 @@ def regenerate_api_key(
     db.commit()
 
     return schemas.ApiKeyResponse(api_key=plain_key)
-
 
 @router.get("/status", response_model=schemas.ApiKeyStatusResponse)
 def api_key_status(

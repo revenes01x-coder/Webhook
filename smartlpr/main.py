@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timezone
 from smartlpr import models
 from smartlpr.database import engine, get_db
-from routers import auth, webhook, terms, admin, access_request, my_cameras, api_key
+from routers import auth, webhook, terms, admin, access_request, my_cameras, api_key, partner
 from worker import start_scheduler
 
 models.Base.metadata.create_all(bind=engine)
@@ -46,6 +46,7 @@ app.include_router(webhook.router)
 app.include_router(api_key.router)
 app.include_router(my_cameras.router)
 app.include_router(admin.router)
+app.include_router(partner.router)
 
 @app.post("/capture-event", tags=["Internal System"])
 def receive_from_rtsp(

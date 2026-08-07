@@ -59,6 +59,7 @@ UNVERIFIED_USER_EXPIRE_HOURS = 24
 # ---- PDPA: ลบข้อมูลป้ายทะเบียน (WebhookEvent + รูปภาพ) ที่เก่าเกินกำหนดออกจากระบบ ----
 PLATE_DATA_RETENTION_DAYS = 30
 
+PARTNER_WEBHOOK_SECRET = _require("PARTNER_WEBHOOK_SECRET")
 
 PLATE_DETECTION_REPO_PATH = os.getenv("PLATE_DETECTION_REPO_PATH")
 PLATE_OCR_MODEL_PATH = os.getenv("PLATE_OCR_MODEL_PATH")

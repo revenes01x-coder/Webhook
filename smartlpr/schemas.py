@@ -295,18 +295,30 @@ class CameraAdminResponse(CameraResponse):
     owner_user_id: int
 
 
-class CameraStatusUpdate(BaseModel):
-    is_active: bool
-
-
 class MyCameraResponse(BaseModel):
     """สำหรับ GET /my/cameras — กล้องของตัวเอง ไม่โชว์ rtsp_url
     verification_status: 'pending' = กำลังตรวจสอบอยู่เบื้องหลัง, 'verified' = ต่อ stream ได้จริง,
-    'failed' = ต่อไม่ได้ (เช็ค URL อีกครั้ง)"""
+    'failed' = ต่อไม่ได้ (เช็ค URL อีกครั้ง)
+    is_active: เปิด/ปิดใช้งานจริง — คุมโดยระบบพาร์ทเนอร์เท่านั้น (ดู routers/partner.py)
+    เจ้าของกล้องไม่มีสิทธิ์ toggle เองอีกต่อไป (endpoint PATCH เดิมถูกถอดออกแล้ว)"""
     camera_id: str
     is_active: bool
     verification_status: str
     created_at: datetime
+
+
+# ---- สำหรับ Partner Integration — ระบบพาร์ทเนอร์สั่งเปิด/ปิดกล้อง (ดู routers/partner.py) ----
+class PartnerCameraStatusUpdate(BaseModel):
+    camera_id: str = Field(..., min_length=1, max_length=100)
+    is_active: bool
+
+    @field_validator("camera_id")
+    @classmethod
+    def validate_camera_id(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("ห้ามเว้นว่าง")
+        return v
 
 
 # ---- สำหรับ API Key (ระบบอัตโนมัติของ user ใช้แทน JWT ตอนยิงเข้ามาเอง) ----

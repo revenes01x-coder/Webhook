@@ -21,11 +21,6 @@ router = APIRouter(prefix="/admin", tags=["Admin"])
 _VALID_STATUSES = {"pending", "approved", "rejected"}
 _DEFAULT_REJECT_NOTE = "คำขอของคุณไม่ได้รับการอนุมัติในขณะนี้"
 
-
-# ---------------------------------------------------------------------------
-# Access Request — คำขอใช้งานระบบโดยรวม
-# ---------------------------------------------------------------------------
-
 @router.get("/access-requests", response_model=schemas.PaginatedResponse[schemas.AccessRequestResponse])
 def list_access_requests(
     status_filter: Optional[str] = Query(
@@ -37,7 +32,6 @@ def list_access_requests(
     db: Session = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    """รองรับ pagination ผ่าน query param ?page=&page_size= (ดีฟอลต์ page=1, page_size=20)"""
     if status_filter and status_filter not in _VALID_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -51,19 +45,16 @@ def list_access_requests(
 
     return paginate(query, page_params)
 
-
 @router.get("/access-requests/{request_id}", response_model=schemas.AccessRequestResponse)
 def get_access_request_detail(
     request_id: int,
     db: Session = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    """ดูรายละเอียดฟอร์มที่ user กรอกมาแบบเต็มๆ ทีละใบ (ใช้ก่อนตัดสินใจ approve/reject)"""
     req = db.query(models.AccessRequest).filter(models.AccessRequest.id == request_id).first()
     if not req:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ไม่พบคำขอนี้")
     return req
-
 
 @router.patch("/access-requests/{request_id}", response_model=schemas.AccessRequestResponse)
 def review_access_request(
@@ -90,13 +81,9 @@ def review_access_request(
         req.status = "rejected"
         req.admin_note = payload.admin_note  # ไม่บังคับ อาจเป็น None
 
-
     db.commit()
     db.refresh(req)
 
-    # ส่งอีเมลแจ้ง user หลัง commit สำเร็จแล้วเท่านั้น ถ้าส่งเมลพังไม่ rollback สถานะ
-    # (เหมือน pattern ตอน register: DB เป็นความจริงหลัก อีเมลเป็นแค่การแจ้งเตือน)
-    # ส่งไปที่ contact_email ที่กรอกในฟอร์ม ไม่ใช่อีเมล login เพราะอาจเป็นคนละคนกัน
     try:
         if req.status == "approved":
             send_access_approved_email(req.contact_email)
@@ -107,23 +94,15 @@ def review_access_request(
 
     return req
 
-
-# ---------------------------------------------------------------------------
-# Camera — ตอนนี้ user เป็นเจ้าของกล้องเอง (POST /my/cameras) admin แค่ดูภาพรวม
-# และเปิด/ปิดกล้องของใครก็ได้ (เช่น กรณีผิดกฎ) ไม่มีสิทธิ์สร้าง/แจกจ่ายสิทธิ์แล้ว
-# ---------------------------------------------------------------------------
-
 @router.get("/cameras", response_model=schemas.PaginatedResponse[schemas.CameraAdminResponse])
 def list_cameras(
     page_params: PageParams = Depends(),
     db: Session = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    """ดูกล้องทั้งหมดในระบบ ไม่ว่าใครเป็นเจ้าของ
-    รองรับ pagination ผ่าน query param ?page=&page_size= (ดีฟอลต์ page=1, page_size=20)"""
+    """ดูกล้องทั้งหมดในระบบ ไม่ว่าใครเป็นเจ้าของ"""
     query = db.query(models.Camera).order_by(models.Camera.id.desc())
     return paginate(query, page_params)
-
 
 @router.get("/users", response_model=schemas.PaginatedResponse[schemas.UserAdminResponse])
 def list_users(
@@ -131,10 +110,9 @@ def list_users(
     db: Session = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    """List user ทั้งหมดในระบบ รองรับ pagination ?page=&page_size= เหมือน endpoint อื่นๆ"""
+    """List user ทั้งหมดในระบบ """
     query = db.query(models.User).order_by(models.User.id.desc())
     return paginate(query, page_params)
-
 
 @router.get("/users/{user_id}", response_model=schemas.UserAdminDetailResponse)
 def get_user_detail(
@@ -142,7 +120,7 @@ def get_user_detail(
     db: Session = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    """ดูรายละเอียด user คนเดียว พร้อมจำนวน webhook/camera ที่มี (ใช้ประกอบการตัดสินใจระงับ)"""
+    """ดูรายละเอียด user คนเดียว พร้อมจำนวน webhook/camera ที่มี """
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ไม่พบผู้ใช้นี้")
@@ -167,7 +145,6 @@ def get_user_detail(
         camera_count=camera_count,
     )
 
-
 @router.patch("/users/{user_id}/suspend", response_model=schemas.UserAdminResponse)
 def set_user_suspend_status(
     user_id: int,
@@ -191,8 +168,6 @@ def set_user_suspend_status(
     db.commit()
     db.refresh(user)
 
-    # ส่งอีเมลแจ้ง user หลัง commit สำเร็จแล้วเท่านั้น (เหมือน pattern review_access_request
-    # ด้านบน) ส่งพังไม่ rollback สถานะระงับ/ปลดระงับ แค่ log error ทิ้ง
     try:
         if user.is_suspended:
             send_account_suspended_email(user.email, user.suspended_reason)
