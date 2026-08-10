@@ -2,7 +2,7 @@ import time
 import logging
 import multiprocessing as mp
 
-import models
+from smartlpr import models
 import camera.camera_worker as camera_worker
 from smartlpr.database import SessionLocal
 

@@ -531,8 +531,11 @@ def verify_reset_otp(payload: schemas.VerifyResetOtpRequest, request: Request, d
 
 @router.post("/reset-password")
 def reset_password(payload: schemas.ResetPasswordRequest, request: Request, db: Session = Depends(get_db)):
-    # ตรวจ token ก่อน (ได้ email กลับมาถ้าถูกต้อง) — token หมดอายุ/ปลอม จะ raise ในนี้เลย
-    email = decode_password_reset_token(payload.reset_token)
+    # ตรวจ token ก่อน (ได้ email กลับมาถ้าถูกต้อง) — token หมดอายุ/ปลอม/ถูกใช้ไปแล้ว (revoked)
+    # จะ raise ในนี้เลย — ต้องส่ง db เข้าไปเช็คสถานะ revoke ด้วยแล้ว (เดิมเช็คแค่ลายเซ็น/exp/
+    # purpose แต่ไม่เช็คว่าเคยถูกใช้ไปแล้วหรือยัง ทำให้ token ใบเดียวเอาไปตั้งรหัสผ่านซ้ำได้
+    # หลายครั้งภายในอายุ token — ดู decode_password_reset_token ใน smartlpr/security.py)
+    email = decode_password_reset_token(payload.reset_token, db)
 
     client_ip = request.client.host
     lockout_key = f"reset_password_{email}_{client_ip}"
@@ -545,6 +548,11 @@ def reset_password(payload: schemas.ResetPasswordRequest, request: Request, db: 
 
     user.hashed_password = get_password_hash(payload.new_password)
     db.commit()
+
+    # เผา token ใบนี้ทิ้งทันทีหลังใช้สำเร็จ (single-use) — บันทึก jti ลง revoked_tokens
+    # ตารางเดียวกับที่ access token ใช้ (revoke_token รู้แค่ jti/exp ไม่สนใจ purpose)
+    # กัน token ใบเดิมถูกเอากลับมาใช้ตั้งรหัสผ่านซ้ำอีก ต่อให้ยังไม่หมดอายุตามเวลาก็ตาม
+    revoke_token(db, payload.reset_token)
 
     active_families = (
         db.query(models.RefreshToken.family_id)

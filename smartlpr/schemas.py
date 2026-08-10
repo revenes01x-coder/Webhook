@@ -5,36 +5,43 @@ from typing import Optional, Literal
 
 from smartlpr.pagination import PaginatedResponse  # re-export ให้เรียกผ่าน schemas.PaginatedResponse ได้เหมือนโมเดลอื่น
 
-_PASSWORD_ALLOWED_RE = re.compile(r"^[A-Za-z0-9]+$")
 _OTP_RE = re.compile(r"^\d{6}$")
 
-# bcrypt (ที่ใช้ผ่าน passlib ใน security.py) ตัดรหัสผ่านทิ้งอัตโนมัติถ้ายาวเกิน 72 bytes
-# ทำให้รหัสผ่านยาวๆ ที่ต่างกันแค่ท้ายๆ กลายเป็น hash เดียวกันแบบเงียบๆ
-# เลยบังคับ max length ไว้ตรงนี้กันตั้งแต่ชั้น validation ไม่ให้ผู้ใช้ตั้งรหัสผ่านที่ยาวเกินจริง
-PASSWORD_MAX_LENGTH = 72
+PASSWORD_MAX_BYTES = 72
+PASSWORD_MIN_LENGTH = 8
+
+# จำกัดจำนวนตัวอักษรสูงสุดที่ยอมรับตอน parse request body (ไม่ใช่ตัวบังคับความปลอดภัย
+# หลัก แค่กันไม่ให้ client ส่ง payload ใหญ่ผิดปกติเข้ามา) ตัวบังคับจริงคือ PASSWORD_MAX_BYTES
+# ที่เช็คในฟังก์ชัน _validate_password_rules() ด้านล่าง
+PASSWORD_INPUT_MAX_CHARS = 256
 
 
 def _validate_password_rules(v: str) -> str:
-    """กติการหัสผ่านกลาง ใช้ร่วมกันทั้งตอนสมัคร (UserCreate) และตั้งรหัสผ่านใหม่ (ResetPasswordRequest)"""
+    """กติการหัสผ่านกลาง ใช้ร่วมกันทั้งตอนสมัคร (UserCreate) และตั้งรหัสผ่านใหม่ (ResetPasswordRequest)
+
+    เปิดให้ใช้อักขระได้กว้างขึ้นกว่าเดิม (ไม่จำกัดแค่ a-z/A-Z/0-9 อีกต่อไป) ตามแนวทาง
+    NIST 800-63B ที่แนะนำให้เปิดกว้างเรื่องชนิดอักขระที่ผู้ใช้เลือกได้ แล้วคุมความปลอดภัย
+    ด้วยความยาวแทน เพราะการจำกัดชนิดอักขระแบบเดิมลด entropy ที่เลือกได้โดยไม่จำเป็น
+    (ยังคงบังคับต้องมีตัวอักษร + ตัวเลขอย่างน้อยอย่างละ 1 ตัว กันรหัสผ่านที่คาดเดาง่าย
+    เกินไป เช่นตัวเลขล้วนหรือคำธรรมดาล้วน)"""
     v = v.strip()
     errors = []
 
-    if len(v) < 8:
-        errors.append("ต้องมีความยาวอย่างน้อย 8 ตัวอักษร")
+    if len(v) < PASSWORD_MIN_LENGTH:
+        errors.append(f"ต้องมีความยาวอย่างน้อย {PASSWORD_MIN_LENGTH} ตัวอักษร")
 
-    if len(v) > PASSWORD_MAX_LENGTH:
-        errors.append(f"ต้องมีความยาวไม่เกิน {PASSWORD_MAX_LENGTH} ตัวอักษร")
-
-    if not _PASSWORD_ALLOWED_RE.match(v):
+    byte_length = len(v.encode("utf-8"))
+    if byte_length > PASSWORD_MAX_BYTES:
         errors.append(
-            "ใช้ได้เฉพาะตัวอักษรภาษาอังกฤษ (a-z, A-Z) และตัวเลข (0-9) เท่านั้น "
-            "(ห้ามภาษาไทย เว้นวรรค หรืออักขระพิเศษ)"
+            f"ยาวเกินไป: ระบบรองรับรหัสผ่านสูงสุด {PASSWORD_MAX_BYTES} ไบต์ "
+            f"(รหัสผ่านที่กรอกยาว {byte_length} ไบต์ — ถ้ามีอักขระภาษาไทยหรือสัญลักษณ์พิเศษ "
+            "บางตัวอาจกินมากกว่า 1 ไบต์ต่อตัวอักษร ทำให้ยาวเกินได้ทั้งที่นับตัวอักษรดูไม่เยอะ)"
         )
-    else:
-        if not any(ch.isalpha() for ch in v):
-            errors.append("ต้องมีตัวอักษรภาษาอังกฤษอย่างน้อย 1 ตัว")
-        if not any(ch.isdigit() for ch in v):
-            errors.append("ต้องมีตัวเลขอย่างน้อย 1 ตัว")
+
+    if not any(ch.isalpha() for ch in v):
+        errors.append("ต้องมีตัวอักษรอย่างน้อย 1 ตัว")
+    if not any(ch.isdigit() for ch in v):
+        errors.append("ต้องมีตัวเลขอย่างน้อย 1 ตัว")
 
     if errors:
         raise ValueError("รหัสผ่านไม่ถูกต้อง: " + ", ".join(errors))
@@ -47,18 +54,17 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str = Field(
         ...,
-        max_length=PASSWORD_MAX_LENGTH,
+        max_length=PASSWORD_INPUT_MAX_CHARS,
         description=(
-            f"รหัสผ่านต้องมีความยาว 8-{PASSWORD_MAX_LENGTH} ตัวอักษร "
-            "ใช้ได้เฉพาะตัวอักษรภาษาอังกฤษ (a-z, A-Z) และตัวเลข (0-9) เท่านั้น "
-            "และต้องมีทั้งตัวอักษรภาษาอังกฤษอย่างน้อย 1 ตัว และตัวเลขอย่างน้อย 1 ตัว "
-            "(ห้ามภาษาไทย เว้นวรรค หรืออักขระพิเศษ)"
+            f"รหัสผ่านต้องมีความยาวอย่างน้อย {PASSWORD_MIN_LENGTH} ตัวอักษร และไม่เกิน "
+            f"{PASSWORD_MAX_BYTES} ไบต์เมื่อเข้ารหัสแบบ UTF-8 ต้องมีทั้งตัวอักษรอย่างน้อย 1 ตัว "
+            "และตัวเลขอย่างน้อย 1 ตัว ใช้อักขระอื่นๆ ร่วมได้ (สัญลักษณ์ ภาษาไทย ฯลฯ)"
         ),
         examples=["Passw0rd"],
     )
     confirm_password: str = Field(
         ...,
-        max_length=PASSWORD_MAX_LENGTH,
+        max_length=PASSWORD_INPUT_MAX_CHARS,
         description="กรอกรหัสผ่านซ้ำอีกครั้งเพื่อยืนยัน ต้องตรงกับ password",
     )
 
@@ -149,10 +155,10 @@ class ResetTokenResponse(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     reset_token: str
-    new_password: str = Field(..., max_length=PASSWORD_MAX_LENGTH, examples=["Passw0rd"])
+    new_password: str = Field(..., max_length=PASSWORD_INPUT_MAX_CHARS, examples=["Passw0rd"])
     confirm_new_password: str = Field(
         ...,
-        max_length=PASSWORD_MAX_LENGTH,
+        max_length=PASSWORD_INPUT_MAX_CHARS,
         description="กรอกรหัสผ่านใหม่ซ้ำอีกครั้งเพื่อยืนยัน ต้องตรงกับ new_password",
     )
 

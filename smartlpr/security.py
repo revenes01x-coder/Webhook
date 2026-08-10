@@ -36,14 +36,30 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
 
 def create_password_reset_token(email: str) -> str:
     """Token ชั่วคราวอายุสั้น (นาที) ออกให้หลัง verify OTP สำเร็จ เพื่อยืนยันสิทธิ์ตั้งรหัสผ่านใหม่
-    มี claim purpose='password_reset' แยกจาก access token ปกติ กัน token คนละประเภทเอามาใช้แทนกัน"""
+    มี claim purpose='password_reset' แยกจาก access token ปกติ กัน token คนละประเภทเอามาใช้แทนกัน
+
+    มี jti เหมือน access token (create_access_token) — เพื่อให้ single-use ได้: หลังใช้
+    ตั้งรหัสผ่านสำเร็จ 1 ครั้ง routers/auth.py:reset_password จะเรียก revoke_token(db, token)
+    บันทึก jti นี้ลง revoked_tokens ทันที ป้องกันเอา token ใบเดิมมาใช้ตั้งรหัสผ่านซ้ำได้อีก
+    ในช่วงที่ยังไม่หมดอายุตามเวลา (เดิมไม่มี jti เลย เลยตั้งรหัสผ่านซ้ำกี่ครั้งก็ได้ด้วย
+    token ใบเดียวตราบใดที่ยังไม่ครบ 10 นาที)"""
     expire = datetime.now(timezone.utc) + timedelta(minutes=PASSWORD_RESET_TOKEN_EXPIRE_MINUTES)
-    to_encode = {"sub": email, "purpose": "password_reset", "exp": expire}
+    to_encode = {
+        "sub": email,
+        "purpose": "password_reset",
+        "exp": expire,
+        "jti": uuid.uuid4().hex,
+    }
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def decode_password_reset_token(token: str) -> str:
-    """ตรวจ token จาก create_password_reset_token คืน email ถ้าถูกต้อง ไม่งั้น raise HTTPException"""
+def decode_password_reset_token(token: str, db: Session) -> str:
+    """ตรวจ token จาก create_password_reset_token คืน email ถ้าถูกต้อง ไม่งั้น raise HTTPException
+
+    ต้องรับ db เพิ่มแล้ว (เดิมไม่ต้องใช้) — เพื่อเช็คว่า jti นี้เคยถูก revoke ไปแล้วหรือยัง
+    ผ่าน is_token_revoked() ตัวเดียวกับที่ get_current_user ใช้เช็ค access token ถ้าเคยถูก
+    ใช้ตั้งรหัสผ่านไปแล้วรอบก่อนหน้า (revoke_token ถูกเรียกตอนนั้น) ให้ถือว่าใช้ไม่ได้อีก
+    ต่อให้ยังไม่หมดอายุตามเวลาก็ตาม (บังคับ single-use)"""
     invalid_exception = HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail="ลิงก์/token สำหรับตั้งรหัสผ่านใหม่ไม่ถูกต้องหรือหมดอายุ กรุณาขอ OTP ใหม่อีกครั้ง",
@@ -57,7 +73,11 @@ def decode_password_reset_token(token: str) -> str:
         raise invalid_exception
 
     email = payload.get("sub")
-    if not email:
+    jti = payload.get("jti")
+    if not email or not jti:
+        raise invalid_exception
+
+    if is_token_revoked(db, jti):
         raise invalid_exception
 
     return email
@@ -66,7 +86,10 @@ def revoke_token(db: Session, token: str) -> None:
     """ถอด jti + exp ออกจาก token แล้วบันทึกลง revoked_tokens
     Idempotent: ถ้า jti นี้ถูก revoke ไปแล้ว (เช่นกด logout ซ้ำ) ไม่ error
     token ที่ decode ไม่ผ่าน หรือไม่มี jti/exp (token เก่าก่อน deploy ฟีเจอร์นี้) จะเงียบๆ ไม่ทำอะไร
-    เพราะ token แบบนั้นใช้ไม่ได้อยู่แล้ว หรือปล่อยให้หมดอายุเองตามปกติ"""
+    เพราะ token แบบนั้นใช้ไม่ได้อยู่แล้ว หรือปล่อยให้หมดอายุเองตามปกติ
+
+    ใช้ร่วมกันทั้ง access token (logout) และ password reset token (reset-password สำเร็จ)
+    เพราะฟังก์ชันนี้สนใจแค่ jti/exp เท่านั้น ไม่สนใจ claim อื่นๆ หรือ purpose ของ token เลย"""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:

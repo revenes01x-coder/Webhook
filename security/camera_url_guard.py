@@ -1,4 +1,5 @@
 from urllib.parse import urlparse, urlunparse
+import ipaddress
 from fastapi import HTTPException, status
 from security.ip_guard import resolve_and_check_ip, SSRFBlockedError
 
@@ -48,6 +49,11 @@ def resolve_rtsp_url_pinned(rtsp_url: str) -> str:
     เดียวกัน (DNS อาจถูกเปลี่ยนในช่วงเสี้ยววินาทีนั้นพอดี = DNS rebinding) การแทน IP ตรงๆ ใน URL
     ก่อนส่งให้ FFmpeg คือทางเดียวที่ปิดช่องนี้ได้จริง 100%
 
+    IPv6 literal ต้องครอบด้วย [] เสมอเวลาใส่ใน URL (RFC 3986) เช่น [2001:db8::1]:554
+    ไม่งั้น urlunparse จะแยก host กับ :port ไม่ออก (โดน : ที่เป็นส่วนหนึ่งของ IPv6 เองบังตา)
+    resolve_and_check_ip() (ip_guard.py) เช็คทั้ง IPv4/IPv6 แล้วอาจคืน IP แบบ IPv6 กลับมาได้
+    เลยต้องเช็ค version แล้วครอบ bracket ให้ตรงนี้ก่อนประกอบกลับเป็น URL — IPv4 ไม่ต้องทำอะไรเพิ่ม
+
     ใช้ได้อย่างปลอดภัยเพราะ RTSP ปกติไม่ทำ TLS/SNI validation กับ hostname (ต่างจาก HTTPS)
     การต่อด้วย IP ตรงๆ จึงไม่กระทบการทำงานปกติ (ยกเว้นเคสหายากที่กล้อง/เซิร์ฟเวอร์ RTSP ทำ
     virtual host แยกตาม hostname ซึ่งไม่ใช่ pattern ปกติของอุปกรณ์กล้อง IP)
@@ -62,9 +68,12 @@ def resolve_rtsp_url_pinned(rtsp_url: str) -> str:
 
     ip = resolve_and_check_ip(hostname)
 
-    netloc = ip
+    ip_obj = ipaddress.ip_address(ip)
+    host_str = f"[{ip}]" if ip_obj.version == 6 else ip
+
+    netloc = host_str
     if parsed.port:
-        netloc = f"{ip}:{parsed.port}"
+        netloc = f"{host_str}:{parsed.port}"
     if parsed.username:
         userinfo = parsed.username
         if parsed.password:
