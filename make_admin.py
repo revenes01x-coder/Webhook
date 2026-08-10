@@ -1,11 +1,4 @@
 """
-Script สำหรับตั้งให้ user ที่มีอยู่แล้วในระบบเป็น admin
-ใช้ SessionLocal/models ตัวเดียวกับแอป ไม่แตะฐานข้อมูลตรงๆ (ไม่เขียน SQL มือ)
-
-เงื่อนไข: user ต้องสมัคร (POST /auth/register) และยืนยัน OTP
-(POST /auth/verify-otp) ให้เสร็จก่อน ถึงจะมี record ในตาราง users ให้ promote ได้
-ถ้ายังไม่ verify แล้วปล่อยไว้เกิน 24 ชม. cleanup job จะลบ record ทิ้งไปเอง
-
 วิธีใช้ (รันจาก terminal ที่ root ของโปรเจกต์ ที่ที่มี .env อยู่):
     python make_admin.py user@example.com
 
