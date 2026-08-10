@@ -48,6 +48,21 @@ def _is_valid_ack(event: models.WebhookEvent, response: httpx.Response) -> bool:
     return body.get("event_id") == event.source_event_id
 
 
+def _read_event_images(event: models.WebhookEvent) -> dict:
+    """อ่านไฟล์รูป full/crop แบบ sync (blocking disk I/O) — เรียกผ่าน asyncio.to_thread เท่านั้น
+    ไม่ให้ blocking I/O นี้ไปแช่ event loop ตอนมีหลาย event ยิงพร้อมกัน (REALTIME_CONCURRENCY=5 /
+    RESUME_CONCURRENCY=3 ผ่าน asyncio.gather) — หลักการเดียวกับที่ is_url_host_safe() ถูกห่อ
+    ด้วย asyncio.to_thread ใน _send_webhook_request() ด้านล่าง (SSRF check ก็เป็น blocking call
+    เหมือนกัน) ไฟล์นี้ไม่มี ปล่อยให้ FileNotFoundError จาก open() ลอยออกไปให้ caller จับเอง
+    (ดู except FileNotFoundError ใน _send_webhook_request)"""
+    with open(event.full_image_path, "rb") as f_full, \
+         open(event.crop_image_path, "rb") as f_crop:
+        return {
+            "image_full": (f"{event.id}_full.jpg", f_full.read(), "image/jpeg"),
+            "image_crop": (f"{event.id}_crop.jpg", f_crop.read(), "image/jpeg"),
+        }
+
+
 async def _send_webhook_request(client: httpx.AsyncClient, event: models.WebhookEvent):
     """ยิง 1 event จริงออกไป คืน (result_type, error_msg) เท่านั้น ไม่แตะ DB ในนี้เลย
     (กัน sync DB call ไปบล็อก event loop ตอนรันพร้อมกันหลาย coroutine ผ่าน asyncio.gather)"""
@@ -67,13 +82,10 @@ async def _send_webhook_request(client: httpx.AsyncClient, event: models.Webhook
         )
 
     try:
-        with open(event.full_image_path, "rb") as f_full, \
-             open(event.crop_image_path, "rb") as f_crop:
-
-            files = {
-                "image_full": (f"{event.id}_full.jpg", f_full.read(), "image/jpeg"),
-                "image_crop": (f"{event.id}_crop.jpg", f_crop.read(), "image/jpeg"),
-            }
+        # อ่านไฟล์รูป (blocking disk I/O) ใน thread แยก เหมือนหลักการเดียวกับ SSRF check
+        # ด้านบน — ไม่งั้นตอนมีหลาย event วิ่งพร้อมกัน การอ่านไฟล์ของ event หนึ่งจะไปบล็อก
+        # event loop จนกระทบ event อื่นที่กำลังรอ network I/O (client.post) อยู่พร้อมกัน
+        files = await asyncio.to_thread(_read_event_images, event)
 
         response = await client.post(
             event.target_url,

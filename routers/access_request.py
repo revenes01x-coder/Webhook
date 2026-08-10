@@ -55,8 +55,6 @@ def submit_access_request(
         status="pending",
     )
     db.add(new_request)
-    db.flush()  
-
     db.commit()
     db.refresh(new_request)
     return new_request
