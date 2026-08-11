@@ -2,7 +2,6 @@ import asyncio
 import logging
 import httpx
 import cv2
-import uuid
 from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.orm import Session
@@ -10,7 +9,7 @@ from smartlpr import models
 from smartlpr.database import SessionLocal
 from services.email_service import send_webhook_endpoint_unhealthy_email
 from smartlpr.config import UNVERIFIED_USER_EXPIRE_HOURS, PLATE_DATA_RETENTION_DAYS
-from security.ssrf_guard import is_url_host_safe
+from security.ssrf_guard import is_url_host_safe, build_test_webhook_payload
 from security.camera_url_guard import resolve_rtsp_url_pinned
 from security.ip_guard import SSRFBlockedError
 
@@ -285,11 +284,6 @@ async def process_webhook_queue():
 
 
 async def _ping_endpoint(client: httpx.AsyncClient, url: str) -> bool:
-    """
-    Health check — ยิง dummy test ที่มี camera_id/event_id จริง (ขึ้นต้นด้วย "TEST_" ตามสัญญาที่แจ้ง
-    ในคู่มือ ให้ปลายทางแยกจาก event จริงได้) แล้วเช็คว่าตอบ 200 พร้อม echo event_id กลับมาตรงกัน
-    เหมือนเงื่อนไข ACK จริง — ถ้าตอบแค่ 200 เฉยๆ แต่ไม่ echo event_id ให้ตรง ไม่ถือว่าฟื้นจริง
-    """
     # [SSRF Guard]: เช็คซ้ำก่อนยิงจริงทุกครั้งเหมือน _send_webhook_request — endpoint ที่ถูกตัดไฟ
     # อาจโดน DNS rebinding ระหว่างที่ตัดไฟอยู่ก็ได้ ไม่ควรถือว่า "ฟื้น" แค่เพราะ ping ผ่าน
     is_safe = await asyncio.to_thread(is_url_host_safe, url)
@@ -299,17 +293,20 @@ async def _ping_endpoint(client: httpx.AsyncClient, url: str) -> bool:
         )
         return False
 
-    test_event_id = f"TEST_Event_{uuid.uuid4().hex[:8]}"
-    test_camera_id = f"TEST_Camera_{uuid.uuid4().hex[:8]}"
-    dummy_payload = {"camera_id": test_camera_id, "event_id": test_event_id}
-
     try:
-        response = await client.post(url, data=dummy_payload, timeout=HEALTH_CHECK_TIMEOUT_SECONDS)
+        test_event_id, dummy_payload, dummy_files = build_test_webhook_payload()
+
+        response = await client.post(
+            url, data=dummy_payload, files=dummy_files, timeout=HEALTH_CHECK_TIMEOUT_SECONDS
+        )
         if response.status_code != 200:
             return False
 
         body = response.json()
         return isinstance(body, dict) and body.get("event_id") == test_event_id
+    except RuntimeError as e:
+        logging.error(f"[Health Check] ไม่สามารถโหลดรูปทดสอบ webhook: {e}")
+        return False
     except Exception:
         return False
 

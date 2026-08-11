@@ -78,3 +78,4 @@ CAR_COLOR_CLASSNAMES_PATH = os.getenv("CAR_COLOR_CLASSNAMES_PATH")
 CAPTURES_SAVE_DIR = os.getenv("CAPTURES_SAVE_DIR", "captures")
 
 CAPTURE_EVENT_WEBHOOK_URL = os.getenv("CAPTURE_EVENT_WEBHOOK_URL", "http://localhost:8000/capture-event")
+TEST_WEBHOOK_IMAGE_PATH = os.getenv("TEST_WEBHOOK_IMAGE_PATH", "assets/test_webhook_image.jpg")
