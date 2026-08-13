@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from smartlpr import models
 import smartlpr.schemas as schemas
@@ -58,7 +59,16 @@ def add_camera_from_partner(
         verification_status="pending",
     )
     db.add(new_camera)
-    db.commit()
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"camera_id '{payload.camera_id}' ถูกใช้ไปแล้ว กรุณาตั้งชื่ออื่น",
+        )
+
     db.refresh(new_camera)
 
     return schemas.MyCameraResponse(
