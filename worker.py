@@ -34,7 +34,7 @@ CAMERA_VERIFY_TIMEOUT_SECONDS = 8
 
 def _is_valid_ack(event: models.WebhookEvent, response: httpx.Response) -> bool:
     """
-    ACK ถูกต้องก็ต่อเมื่อ status 200 + body เป็น JSON parse ได้ + event_id ตรงกับ source_event_id
+    ACK ถูกต้องก็ต่อเมื่อ status 2xx + body เป็น JSON parse ได้ + event_id ตรงกับ source_event_id
 """
     try:
         body = response.json()
@@ -100,14 +100,14 @@ async def _send_webhook_request(client: httpx.AsyncClient, event: models.Webhook
             timeout=10,
         )
 
-        if response.status_code != 200:
+        if response.status_code // 100 != 2:
             return "http_error", f"เซิร์ฟเวอร์ลูกค้าตอบกลับ HTTP {response.status_code}"
 
         if _is_valid_ack(event, response):
             return "success", None
 
         return "ack_mismatch", (
-            f"ปลายทางตอบ 200 แต่ body ไม่ตรง/parse ไม่ได้ "
+            f"ปลายทางตอบ 2xx แต่ body ไม่ตรง/parse ไม่ได้ "
             f"(คาดหวัง event_id={event.source_event_id}) ได้: {response.text[:300]!r}"
         )
 
@@ -306,7 +306,7 @@ async def _ping_endpoint(client: httpx.AsyncClient, url: str) -> bool:
         response = await client.post(
             url, data=dummy_payload, files=dummy_files, timeout=HEALTH_CHECK_TIMEOUT_SECONDS
         )
-        if response.status_code != 200:
+        if response.status_code // 100 != 2:
             return False
 
         body = response.json()

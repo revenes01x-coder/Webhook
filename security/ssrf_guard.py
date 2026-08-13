@@ -98,11 +98,11 @@ def verify_webhook_url(url: str):
     try:
         response = requests.post(url, data=dummy_payload, files=dummy_files, timeout=5)
 
-        # 5. เช็คว่าตอบกลับ 200 OK ไหม
-        if response.status_code != 200:
+        # 5. เช็คว่าตอบกลับ 2xx OK ไหม
+        if response.status_code // 100 != 2:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"เซิร์ฟเวอร์ปลายทางตอบกลับ {response.status_code} (ต้องการ 200 OK)"
+                detail=f"เซิร์ฟเวอร์ปลายทางตอบกลับ {response.status_code} (ต้องการ 2xx OK)"
             )
 
         # 6. เช็คว่า body เป็น JSON และ echo event_id กลับมาตรงกัน (สัญญาเดียวกับตอน ACK จริง)
