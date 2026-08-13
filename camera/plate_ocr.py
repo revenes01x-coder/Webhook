@@ -87,8 +87,7 @@ def preprocess(img_input):
     return tensor
 
 
-def predict(img_input):
-    """รับรูปป้าย คืน string ที่อ่านได้"""
+def predict(img_input) -> tuple[str, float]:
     tensor = preprocess(img_input)
     batch_size = tensor.size(0)
     length_for_pred = torch.IntTensor([BATCH_MAX_LEN] * batch_size).to(device)
@@ -96,9 +95,17 @@ def predict(img_input):
 
     with torch.no_grad():
         preds = model(tensor, text_for_pred, is_train=False)
-        _, preds_index = preds.max(2)
+        preds_prob = F.softmax(preds, dim=2)
+        preds_max_prob, preds_index = preds_prob.max(dim=2)
         preds_str = converter.decode(preds_index, length_for_pred)
 
     pred = preds_str[0]
-    pred = pred[:pred.find('[s]')]  # ตัด end token ออก
-    return pred
+    pred_max_prob = preds_max_prob[0]
+
+    end_idx = pred.find('[s]')  # ตัด end token ออก (พฤติกรรมเดิม รวมถึงเคส -1 ถ้าไม่เจอ)
+    pred = pred[:end_idx]
+    pred_max_prob = pred_max_prob[:end_idx]
+
+    confidence = pred_max_prob.cumprod(dim=0)[-1].item() if pred_max_prob.numel() > 0 else 0.0
+
+    return pred, confidence

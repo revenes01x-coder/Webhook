@@ -58,14 +58,14 @@ COLOR_MIN_CONFIDENCE = 0.3   # ถ้าโมเดลมั่นใจต่�
 SAVE_DIR_ROOT   = CAPTURES_SAVE_DIR                     # ดีฟอลต์ "captures" (relative, อยู่ใน .gitignore)
 WEBHOOK_URL     = CAPTURE_EVENT_WEBHOOK_URL             # ดีฟอลต์ "http://localhost:8000/capture-event"
 
-YOLO_CONF        = 0.4
+YOLO_CONF        = 0.6
 MIN_ASPECT_RATIO = 0.8
 MIN_WIDTH        = 50
 RESIZE_FACTOR    = 3
 PADDING          = 10
 COOLDOWN_SEC     = 10  # เดิม 3 → เพิ่มเป็น 10 (ลดความถี่การประมวลผลเฟรมโดยรวม)
 RECONNECT_SEC    = 3   # วินาทีที่รอก่อน reconnect กล้อง
-
+OCR_MIN_CONFIDENCE = 0.60
 PLATE_DEDUP_WINDOW_SEC = 60
 # ============================================================
 
@@ -154,11 +154,24 @@ def preprocess_plate(img, x1, y1, x2, y2):
     return plate_crop, enhanced_gray
 
 
-def read_plate(plate_crop, enhanced_gray):
-    text = ocr_predict(enhanced_gray)
-    if not text:
-        text = ocr_predict(plate_crop)
-    if not text:
+def read_plate(plate_crop, enhanced_gray, logger):
+    """อ่านป้ายทะเบียน ลองภาพที่ enhance (CLAHE) ก่อน แล้วลองภาพ crop สีปกติเทียบด้วยเสมอ
+    ถ้าอันไหนมั่นใจกว่าก็ใช้อันนั้น (บางครั้ง enhance กลับทำให้อ่านยากขึ้นในบางสภาพแสง)
+
+    ถ้าผลลัพธ์ที่มั่นใจที่สุดยังต่ำกว่า OCR_MIN_CONFIDENCE (หรืออ่านได้ค่าว่าง) ถือว่าอ่านไม่ได้
+    -> คืนค่าว่าง ("", "") ไม่ส่งข้อมูลที่ไม่น่าเชื่อถือออกไปยิง webhook"""
+    text, confidence = ocr_predict(enhanced_gray)
+    source = "enhanced_gray"
+
+    fallback_text, fallback_confidence = ocr_predict(plate_crop)
+    if fallback_text and fallback_confidence > confidence:
+        text, confidence, source = fallback_text, fallback_confidence, "plate_crop"
+
+    if not text or confidence < OCR_MIN_CONFIDENCE:
+        logger.info(
+            f"ข้ามป้าย: อ่านได้ '{text}' มั่นใจ {confidence:.2f} ต่ำกว่าเกณฑ์ "
+            f"{OCR_MIN_CONFIDENCE} (แหล่งที่มั่นใจสุด: {source})"
+        )
         return "", ""
 
     text = text.replace('.', '').replace(',', '').replace('-', '').strip()
@@ -382,7 +395,7 @@ def run(camera_id: str, rtsp_url: str):
 
                 for px1, py1, px2, py2 in valid_plates:
                     plate_crop, enhanced_gray = preprocess_plate(car_crop, px1, py1, px2, py2)
-                    plate, province = read_plate(plate_crop, enhanced_gray)
+                    plate, province = read_plate(plate_crop, enhanced_gray ,logger)
 
                     if plate:
                         # [กันจับซ้ำ]: ป้ายนี้เพิ่งถูกบันทึกไปเมื่อไม่นานมานี้หรือไม่ (ถือเป็นรถคันเดิม

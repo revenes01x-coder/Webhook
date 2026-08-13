@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 import logging
 import httpx
 import cv2
@@ -34,17 +35,23 @@ CAMERA_VERIFY_TIMEOUT_SECONDS = 8
 def _is_valid_ack(event: models.WebhookEvent, response: httpx.Response) -> bool:
     """
     ACK ถูกต้องก็ต่อเมื่อ status 200 + body เป็น JSON parse ได้ + event_id ตรงกับ source_event_id
-    (ไม่เช็ค plate แล้ว — event_id พอสำหรับยืนยันตัวตนของ event นี้)
-    ไม่มี HMAC signature เพราะ worker เป็นฝ่ายยิง request ออกไปเองและรอ response
-    ในการเชื่อมต่อเดียวกัน ความเสี่ยงเรื่อง ack ปลอมจึงต่ำอยู่เแล้ว
-    """
+"""
     try:
         body = response.json()
     except ValueError:
         return False
     if not isinstance(body, dict):
         return False
-    return body.get("event_id") == event.source_event_id
+
+    received_event_id = body.get("event_id")
+    if not isinstance(received_event_id, str):
+        return False
+
+    try:
+        return uuid.UUID(received_event_id) == uuid.UUID(event.source_event_id)
+    except (ValueError, AttributeError, TypeError):
+        # source_event_id หรือค่าที่ปลายทางตอบมา parse เป็น UUID ไม่ได้ (ผิดปกติ) -> ถือว่าไม่ตรง
+        return False
 
 
 def _read_event_images(event: models.WebhookEvent) -> dict:
