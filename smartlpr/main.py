@@ -9,7 +9,6 @@ from smartlpr.database import engine, get_db
 from routers import auth, webhook, terms, admin, access_request, my_cameras, api_key, partner
 from worker import start_scheduler
 import os
-import hmac
 from smartlpr.config import CAPTURES_SAVE_DIR
 from smartlpr.security import require_capture_event_secret
 
@@ -83,7 +82,7 @@ def receive_from_rtsp(
 
     if not _is_valid_capture_path(full_image_path, camera_id, "full") or \
        not _is_valid_capture_path(crop_image_path, camera_id, "crop"):
-        return {"status": "ignored", "message": "พาธไฟล์รูปไม่ถูกต้อง"}
+        return {"status": "ignored", "message": "Pathไฟล์รูปไม่ถูกต้อง"}
 
     # 2. เจ้าของกล้องคือ owner_user_id ตรงๆ (กล้องเป็นกรรมสิทธิ์ของ user คนเดียว ไม่มี many-to-many แล้ว)
     owner_user_id = camera.owner_user_id

@@ -66,7 +66,7 @@ PADDING          = 10
 COOLDOWN_SEC     = 10  # เดิม 3 → เพิ่มเป็น 10 (ลดความถี่การประมวลผลเฟรมโดยรวม)
 RECONNECT_SEC    = 3   # วินาทีที่รอก่อน reconnect กล้อง
 
-PLATE_DEDUP_WINDOW_SEC = 20
+PLATE_DEDUP_WINDOW_SEC = 60
 # ============================================================
 
 THAI_PROVINCES = [

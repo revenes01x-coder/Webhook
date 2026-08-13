@@ -336,8 +336,9 @@ def login(
     check_lockout(db, lockout_key, "login_fail", limit=LOGIN_LOCKOUT_LIMIT, window_minutes=LOGIN_LOCKOUT_MINUTES)
 
     user = db.query(models.User).filter(models.User.email == normalized_email).first()
-
-    if not user or not verify_password(form_data.password, user.hashed_password):
+    submitted_password = form_data.password.strip()
+    
+    if not user or not verify_password(submitted_password, user.hashed_password):
         record_attempt(
             db, lockout_key, "login_fail",
             limit=LOGIN_LOCKOUT_LIMIT,
