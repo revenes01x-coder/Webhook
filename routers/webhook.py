@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from smartlpr import models
 import smartlpr.schemas as schemas
 from smartlpr.database import get_db
@@ -20,16 +21,34 @@ def add_webhook(
     # [Rate Limit]: ทดสอบ/เพิ่ม URL ได้ 10 ครั้ง / ชั่วโมง / User
     check_rate_limit(db, f"add_webhook_{current_user.id}", "add_webhook", limit=20, window_minutes=60)
 
+    url_str = str(webhook.url)
+
+    existing = db.query(models.WebhookEndpoint).filter(models.WebhookEndpoint.url == url_str).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="URL นี้ถูกใช้เป็น webhook ในระบบไปแล้ว กรุณาตรวจสอบรายการ webhook ของคุณ (GET /webhook/my) หรือใช้ URL อื่น",
+        )
+
     # ส่ง URL เข้าด่านอรหันต์ SSRF Guard
-    verify_webhook_url(str(webhook.url))
+    verify_webhook_url(url_str)
 
     new_endpoint = models.WebhookEndpoint(
         user_id=current_user.id,
-        url=str(webhook.url),
+        url=url_str,
         is_active=True
     )
     db.add(new_endpoint)
-    db.commit()
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="URL นี้ถูกใช้เป็น webhook ในระบบไปแล้ว กรุณาตรวจสอบรายการ webhook ของคุณ (GET /webhook/my) หรือใช้ URL อื่น",
+        )
+
     db.refresh(new_endpoint)
 
     return new_endpoint
