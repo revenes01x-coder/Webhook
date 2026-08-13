@@ -8,6 +8,10 @@ from smartlpr import models
 from smartlpr.database import engine, get_db
 from routers import auth, webhook, terms, admin, access_request, my_cameras, api_key, partner
 from worker import start_scheduler
+import os
+import hmac
+from smartlpr.config import CAPTURES_SAVE_DIR
+from smartlpr.security import require_capture_event_secret
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -49,6 +53,15 @@ app.include_router(my_cameras.router)
 app.include_router(admin.router)
 app.include_router(partner.router)
 
+def _is_valid_capture_path(path: str, camera_id: str, kind: str) -> bool:
+    """บังคับ path รูปต้องอยู่ใต้ captures/camera_{id}/{kind}/ เท่านั้น (รูปแบบเดียวกับที่
+    camera_worker.py สร้างไฟล์จริง) กันคนตั้ง path เป็นไฟล์อื่นบน server แล้วให้ worker.py
+    เปิดไฟล์นั้นแนบส่งออกทาง webhook ของตัวเองทีหลัง (arbitrary file read)"""
+    expected_root = os.path.realpath(os.path.join(CAPTURES_SAVE_DIR, f"camera_{camera_id}", kind))
+    resolved = os.path.realpath(path)
+    return resolved == expected_root or resolved.startswith(expected_root + os.sep)
+
+
 @app.post("/capture-event", tags=["Internal System"])
 def receive_from_rtsp(
     camera_id: str = Form(...),
@@ -60,6 +73,7 @@ def receive_from_rtsp(
     full_image_path: str = Form(...),
     crop_image_path: str = Form(...),
     db: Session = Depends(get_db),
+    _: None = Depends(require_capture_event_secret),
 ):
 
     # 1. เช็คว่า camera_id นี้มีจริงและ is_active=True ไหม ถ้าไม่ผ่าน -> ignore
@@ -67,20 +81,20 @@ def receive_from_rtsp(
     if not camera or not camera.is_active:
         return {"status": "ignored", "message": "ไม่พบกล้องนี้ในระบบ หรือกล้องถูกปิดใช้งานอยู่"}
 
+    if not _is_valid_capture_path(full_image_path, camera_id, "full") or \
+       not _is_valid_capture_path(crop_image_path, camera_id, "crop"):
+        return {"status": "ignored", "message": "พาธไฟล์รูปไม่ถูกต้อง"}
+
     # 2. เจ้าของกล้องคือ owner_user_id ตรงๆ (กล้องเป็นกรรมสิทธิ์ของ user คนเดียว ไม่มี many-to-many แล้ว)
     owner_user_id = camera.owner_user_id
 
     # 2.5 [Suspend Guard]: เจ้าของกล้องถูกระงับอยู่ -> ไม่สร้าง WebhookEvent ใหม่เข้าคิวเลย
-    # (ตอบ "ignored" เงียบๆ เหมือน case อื่นในนี้ ไม่ error ให้กล้อง/สคริปต์ที่ยิง /capture-event
-    # เข้ามาต้อง handle error พิเศษ — เป็นชั้นป้องกันสำรองด้วย เผื่อกล้องบาง process ยัง capture
-    # อยู่ทันเวลาก่อนที่ camera_manager.py จะ terminate ให้ในรอบ poll ถัดไป)
     owner = db.query(models.User).filter(models.User.id == owner_user_id).first()
     if not owner or owner.is_suspended:
         return {"status": "ignored", "message": "บัญชีเจ้าของกล้องนี้ถูกระงับการใช้งานอยู่ ไม่ส่งข้อมูลต่อ"}
 
     # 3. เก็บข้อมูลข้อความไว้ใน payload (path รูปเก็บแยกคนละ column)
-    #    field name ตรงตามคู่มือที่แจกให้ user: license_plate, capture_time, camera_id
-    #    (event_id คงชื่อเดิมไว้ตามที่ตกลง ไม่เปลี่ยนตามคู่มือที่ใช้ received_event_id)
+
     text_payload = {
         "event_id": event_id,
         "camera_id": camera_id,
@@ -90,10 +104,8 @@ def receive_from_rtsp(
         "capture_time": timestamp,
     }
 
-    # 4. หา WebhookEndpoint ที่กล้องตัวนี้ผูกไว้ (Camera.webhook_endpoint_id) -> สร้าง
-    #    WebhookEvent ลงคิว 1 event ต่อ 1 กล้อง/1 การตรวจจับเท่านั้น (เปลี่ยนจากเดิมที่
-    #    fan-out ไปทุก active webhook ของเจ้าของกล้อง — ตอนนี้ 1 กล้อง ผูกกับ webhook
-    #    เดียวเสมอตั้งแต่ตอนสร้าง ผ่าน POST /partner/cameras ดู smartlpr/models.py: Camera)
+    # 4. หา WebhookEndpoint ที่กล้องตัวนี้ผูกไว้ 
+    #    WebhookEvent ลงคิว 1 event ต่อ 1 กล้อง/1 การตรวจจับเท่านั้น 
     endpoint = db.query(models.WebhookEndpoint).filter(
         models.WebhookEndpoint.id == camera.webhook_endpoint_id,
         models.WebhookEndpoint.is_active == True

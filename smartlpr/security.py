@@ -5,10 +5,11 @@ from fastapi import Depends, HTTPException, status, Header
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from smartlpr.database import get_db
-from smartlpr.config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, PASSWORD_RESET_TOKEN_EXPIRE_MINUTES
+from smartlpr.config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, PASSWORD_RESET_TOKEN_EXPIRE_MINUTES, CAPTURE_EVENT_SECRET
 from services.token import hash_api_key
 from smartlpr import models
 import uuid 
+import hmac
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
@@ -234,3 +235,14 @@ def require_api_key(
         )
 
     return user
+
+def require_capture_event_secret(
+    x_capture_secret: str = Header(..., alias="X-Capture-Secret"),
+) -> None:
+    """ยืนยันว่า POST /capture-event มาจาก camera_worker.py ของระบบเราเองเท่านั้น
+    ใช้ hmac.compare_digest กัน timing attack เหมือน verify_otp/verify_api_key"""
+    if not hmac.compare_digest(x_capture_secret, CAPTURE_EVENT_SECRET):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="ไม่ได้รับอนุญาต",
+        )

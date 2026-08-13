@@ -26,6 +26,7 @@ from smartlpr.config import (
     CAR_COLOR_CLASSNAMES_PATH,
     CAPTURES_SAVE_DIR,
     CAPTURE_EVENT_WEBHOOK_URL,
+    CAPTURE_EVENT_SECRET,   # [Internal Auth] secret กลาง ยิงคู่กับ backend ผ่าน header
 )
 
 import tensorflow as tf
@@ -198,10 +199,20 @@ def send_to_webhook(camera_id, path_full, path_crop, plate, province, color, ts_
             "crop_image_path": path_crop,
         }
 
-        response = requests.post(WEBHOOK_URL, data=data, timeout=5)
+        # [Internal Auth]: แนบ secret กลางไปด้วยทุกครั้ง — backend (/capture-event)
+        # จะปฏิเสธ request ที่ไม่มี header นี้หรือค่าไม่ตรง (ดู smartlpr/security.py:
+        # require_capture_event_secret) กันคนนอกที่รู้ camera_id ยิงข้อมูล/path ปลอมเข้ามา
+        response = requests.post(
+            WEBHOOK_URL,
+            data=data,
+            headers={"X-Capture-Secret": CAPTURE_EVENT_SECRET},
+            timeout=5,
+        )
 
         if response.status_code == 200:
             logger.info("ส่ง webhook สำเร็จ")
+        elif response.status_code == 401:
+            logger.error("webhook ปฏิเสธ (401) — CAPTURE_EVENT_SECRET ไม่ตรงกับฝั่ง backend เช็ค .env ทั้งสองฝั่ง")
         else:
             logger.warning(f"webhook ตอบกลับ: {response.status_code}")
 
