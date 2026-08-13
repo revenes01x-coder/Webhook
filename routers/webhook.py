@@ -18,7 +18,7 @@ def add_webhook(
 ):
 
     # [Rate Limit]: ทดสอบ/เพิ่ม URL ได้ 10 ครั้ง / ชั่วโมง / User
-    check_rate_limit(db, f"add_webhook_{current_user.id}", "add_webhook", limit=100, window_minutes=60)
+    check_rate_limit(db, f"add_webhook_{current_user.id}", "add_webhook", limit=20, window_minutes=60)
 
     # ส่ง URL เข้าด่านอรหันต์ SSRF Guard
     verify_webhook_url(str(webhook.url))
