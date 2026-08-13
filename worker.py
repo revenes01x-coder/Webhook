@@ -90,7 +90,7 @@ async def _send_webhook_request(client: httpx.AsyncClient, event: models.Webhook
             event.target_url,
             data=event.payload,
             files=files,
-            timeout=10,
+            timeout=30,
         )
 
         if response.status_code != 200:

@@ -62,8 +62,10 @@ MIN_ASPECT_RATIO = 0.8
 MIN_WIDTH        = 50
 RESIZE_FACTOR    = 3
 PADDING          = 10
-COOLDOWN_SEC     = 3   # วินาทีที่รอก่อนตรวจจับรอบใหม่ (กันส่งซ้ำถี่ๆ ตอนรถคันเดิมอยู่ในเฟรมหลายเฟรมติด)
+COOLDOWN_SEC     = 10  # เดิม 3 → เพิ่มเป็น 10 (ลดความถี่การประมวลผลเฟรมโดยรวม)
 RECONNECT_SEC    = 3   # วินาทีที่รอก่อน reconnect กล้อง
+
+PLATE_DEDUP_WINDOW_SEC = 20
 # ============================================================
 
 THAI_PROVINCES = [
@@ -293,6 +295,7 @@ def run(camera_id: str, rtsp_url: str):
     cap = _open_stream_with_retry(rtsp_url, logger)
 
     last_detect_time = 0.0
+    recent_plates: dict[str, float] = {}  # {plate: เวลา (time.time()) ล่าสุดที่เจอป้ายนี้} — กันยิง webhook ซ้ำรถคันเดิม
 
     logger.info("เริ่มทำงาน")
 
@@ -371,6 +374,17 @@ def run(camera_id: str, rtsp_url: str):
                     plate, province = read_plate(plate_crop, enhanced_gray)
 
                     if plate:
+                        # [กันจับซ้ำ]: ป้ายนี้เพิ่งถูกบันทึกไปเมื่อไม่นานมานี้หรือไม่ (ถือเป็นรถคันเดิม
+                        # ที่ยังอยู่ในเฟรม เช่น จอดติดไฟแดง/ไม้กั้น) ถ้าใช่ -> ข้าม ไม่ยิง webhook ซ้ำ
+                        last_seen = recent_plates.get(plate)
+                        if last_seen is not None and (now - last_seen) < PLATE_DEDUP_WINDOW_SEC:
+                            logger.info(
+                                f"ข้ามป้าย {plate} — ซ้ำกับที่เพิ่งบันทึกไป "
+                                f"{now - last_seen:.1f} วิ ก่อนหน้า (ยังไม่ครบ {PLATE_DEDUP_WINDOW_SEC} วิ)"
+                            )
+                            continue
+
+                        recent_plates[plate] = now
                         frame_had_detection = True
                         logger.info(f"เจอป้าย: {plate} {province} | สี: {color}".strip())
                         save_capture(
@@ -380,6 +394,15 @@ def run(camera_id: str, rtsp_url: str):
 
         if frame_had_detection:
             last_detect_time = now
+
+        # [กันจับซ้ำ]: ล้าง entry ที่เก่าเกิน PLATE_DEDUP_WINDOW_SEC ทิ้งเป็นระยะ กัน recent_plates
+        # โตขึ้นเรื่อยๆ ไม่มีที่สิ้นสุดถ้ากล้องรันยาวนานเป็นวันๆ (ทำนอก if ด้านบน เพื่อให้เคลียร์
+        # ได้ทุกรอบที่ผ่าน cooldown ไม่ใช่แค่ตอนมี detection ใหม่)
+        if recent_plates:
+            recent_plates = {
+                p: t for p, t in recent_plates.items()
+                if now - t < PLATE_DEDUP_WINDOW_SEC
+            }
 
 
 if __name__ == "__main__":
