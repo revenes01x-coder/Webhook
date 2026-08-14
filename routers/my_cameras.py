@@ -16,7 +16,7 @@ def list_my_cameras(
     current_user: models.User = Depends(get_current_user),
 ):
     base_query = (
-        db.query(models.Camera, models.WebhookEndpoint.url)
+        db.query(models.Camera, models.WebhookEndpoint.url, models.WebhookEndpoint.is_active)
         .join(models.WebhookEndpoint, models.Camera.webhook_endpoint_id == models.WebhookEndpoint.id)
         .filter(models.Camera.owner_user_id == current_user.id)
     )
@@ -38,9 +38,10 @@ def list_my_cameras(
                 is_active=c.is_active,
                 verification_status=c.verification_status,
                 webhook_url=webhook_url,
+                webhook_is_active=webhook_is_active,
                 created_at=c.created_at,
             )
-            for c, webhook_url in rows
+            for c, webhook_url, webhook_is_active in rows
         ],
         "total": total,
         "page": page_params.page,

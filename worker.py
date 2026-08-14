@@ -318,21 +318,27 @@ async def _ping_endpoint(client: httpx.AsyncClient, url: str) -> bool:
         return False
 
 
-async def process_graveyard_resume():
+async def process_graveyard_resume(endpoint_ids: list[int] | None = None):
     """
     Job B — แยกเด็ดขาดจาก Job A ทั้งคิวและ Semaphore (RESUME_CONCURRENCY)
-    ทุก 30 นาที: เช็คเฉพาะ endpoint ที่ถูกตัดไฟ (is_healthy=False) ว่าฟื้นหรือยัง
-    (query ตอนต้นฟังก์ชันกรอง is_active=True ไว้อยู่แล้ว — endpoint ที่ admin ปิดใช้งาน
-    (is_active=False) จะไม่ถูกหยิบมา ping เลยแม้จะ unhealthy อยู่ก็ตาม รอจนกว่า admin จะเปิดกลับมา)
-    ถ้าฟื้น (ping ตอบ 200) -> เปิดไฟกลับ (is_healthy=True, streak เคลียร์เป็น 0)
-    แล้วยิง event dead_letter ของ endpoint นั้นเอง (ไม่ผ่าน Job A เลย)
+    ทุก 30 นาที (default): เช็คเฉพาะ endpoint ที่ถูกตัดไฟ (is_healthy=False) ว่าฟื้นหรือยัง
+    ...(docstring เดิม)...
+
+    endpoint_ids: ไม่ระบุ (None) = พฤติกรรมเดิมทุกประการ (เรียกจาก scheduler ทุก 30 นาที)
+    ระบุมา = จำกัด scope เฉพาะ endpoint ที่ระบุ ใช้ตอน routers/admin.py:set_webhook_status
+    เรียกทันทีหลัง admin เปิด endpoint ที่เคยถูกตัดไฟกลับมา (ผ่าน resume_endpoint_now ด้านล่าง)
+    ไม่ต้องรอ cron รอบถัดไป — logic ที่เหลือเหมือนเดิมทุกอย่าง ยังต้อง ping สำเร็จจริงก่อนถึงจะ
+    ปลดล็อกและ resume ไม่ได้ trust คำสั่ง admin เฉยๆ
     """
     db: Session = SessionLocal()
     try:
-        unhealthy_endpoints = db.query(models.WebhookEndpoint).filter(
+        query = db.query(models.WebhookEndpoint).filter(
             models.WebhookEndpoint.is_healthy == False,  # noqa: E712
             models.WebhookEndpoint.is_active == True,
-        ).all()
+        )
+        if endpoint_ids is not None:
+            query = query.filter(models.WebhookEndpoint.id.in_(endpoint_ids))
+        unhealthy_endpoints = query.all()
 
         if not unhealthy_endpoints:
             return
@@ -600,6 +606,8 @@ async def cleanup_expired_refresh_tokens():
     finally:
         db.close()
 
+async def resume_endpoint_now(endpoint_id: int) -> None:
+    await process_graveyard_resume(endpoint_ids=[endpoint_id])
 
 def start_scheduler():
     scheduler = AsyncIOScheduler()

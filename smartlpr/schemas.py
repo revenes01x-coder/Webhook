@@ -340,8 +340,8 @@ class CameraAdminResponse(CameraResponse):
     """สำหรับ admin เท่านั้น — เห็น rtsp_url และเจ้าของกล้องได้"""
     rtsp_url: str
     owner_user_id: int
-
-
+    webhook_is_active: bool
+    
 class MyCameraResponse(BaseModel):
     """สำหรับ GET /my/cameras — กล้องของตัวเอง ไม่โชว์ rtsp_url
     verification_status: 'pending' = กำลังตรวจสอบอยู่เบื้องหลัง, 'verified' = ต่อ stream ได้จริง,
@@ -353,6 +353,7 @@ class MyCameraResponse(BaseModel):
     is_active: bool
     verification_status: str
     webhook_url: str
+    webhook_is_active: bool
     created_at: datetime
 
 

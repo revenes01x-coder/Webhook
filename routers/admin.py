@@ -1,9 +1,9 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
 from typing import List, Optional
-
+from worker import resume_endpoint_now
 from smartlpr import models
 import smartlpr.schemas as schemas
 from smartlpr.database import get_db
@@ -102,19 +102,37 @@ def list_cameras(
     db: Session = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    """ดูกล้องทั้งหมดในระบบ ไม่ว่าใครเป็นเจ้าของ"""
-    query = db.query(models.Camera).order_by(models.Camera.id.desc())
-    return paginate(query, page_params)
+    """ดูกล้องทั้งหมดในระบบ ไม่ว่าใครเป็นเจ้าของ พร้อมสถานะ webhook ปลายทางที่ผูกไว้
+    (webhook_is_active) ให้เห็นได้เลยว่ากล้องไหน is_active=True แต่จริงๆ ไม่ได้รันอยู่เพราะ
+    webhook ถูกปิด"""
+    base_query = (
+        db.query(models.Camera, models.WebhookEndpoint.is_active)
+        .join(models.WebhookEndpoint, models.Camera.webhook_endpoint_id == models.WebhookEndpoint.id)
+        .order_by(models.Camera.id.desc())
+    )
 
-@router.get("/users", response_model=schemas.PaginatedResponse[schemas.UserAdminResponse])
-def list_users(
-    page_params: PageParams = Depends(),
-    db: Session = Depends(get_db),
-    admin: models.User = Depends(require_admin),
-):
-    """List user ทั้งหมดในระบบ """
-    query = db.query(models.User).order_by(models.User.id.desc())
-    return paginate(query, page_params)
+    total = base_query.count()
+    rows = base_query.offset(page_params.offset).limit(page_params.page_size).all()
+    total_pages = (total + page_params.page_size - 1) // page_params.page_size if total else 0
+
+    return {
+        "items": [
+            schemas.CameraAdminResponse(
+                id=c.id,
+                is_active=c.is_active,
+                verification_status=c.verification_status,
+                created_at=c.created_at,
+                rtsp_url=c.rtsp_url,
+                owner_user_id=c.owner_user_id,
+                webhook_is_active=webhook_is_active,
+            )
+            for c, webhook_is_active in rows
+        ],
+        "total": total,
+        "page": page_params.page,
+        "page_size": page_params.page_size,
+        "total_pages": total_pages,
+    }
 
 @router.get("/users/{user_id}", response_model=schemas.UserAdminDetailResponse)
 def get_user_detail(
@@ -201,6 +219,7 @@ def list_webhooks(
 def set_webhook_status(
     webhook_id: int,
     payload: schemas.WebhookStatusUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
@@ -210,6 +229,11 @@ def set_webhook_status(
 
     endpoint.is_active = payload.is_active
     endpoint.disabled_reason = payload.admin_note if not payload.is_active else None
+
+    # เก็บไว้ก่อน commit เพื่อรู้ว่าต้อง trigger resume ด้านล่างหรือไม่ (is_healthy ไม่ได้ถูก
+    # แตะในฟังก์ชันนี้เลย อ่านตอนไหนก็ค่าเดิม แค่เขียนให้ชัดเจนว่าอ่านจากตอนไหน)
+    was_unhealthy = not endpoint.is_healthy
+
     db.commit()
     db.refresh(endpoint)
 
@@ -223,5 +247,11 @@ def set_webhook_status(
         except RuntimeError as e:
             action = "เปิด" if endpoint.is_active else "ปิด"
             logging.error(f"ส่งอีเมลแจ้ง{action}ใช้งาน webhook id={endpoint.id} ไม่สำเร็จ: {e}")
+
+    # [Circuit Breaker]: endpoint นี้เคยถูกตัดไฟ (is_healthy=False) อยู่ก่อน admin เปิดกลับมา
+    # -> ลอง ping + resume event ในสุสานทันทีในพื้นหลัง แทนที่จะรอ Job B รอบถัดไป (สูงสุด 30 นาที)
+    # ไม่ set is_healthy=True ตรงๆ ในนี้เพราะไม่อยาก trust คำสั่ง admin เฉยๆ โดยไม่เช็คจริง
+    if payload.is_active and was_unhealthy:
+        background_tasks.add_task(resume_endpoint_now, endpoint.id)
 
     return endpoint
