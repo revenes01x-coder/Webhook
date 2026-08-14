@@ -72,6 +72,7 @@ class Camera(Base):
 
 class RateLimit(Base):
     __tablename__ = "rate_limits"
+    __table_args__ = (UniqueConstraint("key", "action", name="uq_ratelimit_key_action"),)
 
     id = Column(Integer, primary_key=True, index=True)
     key = Column(String, index=True, nullable=False)

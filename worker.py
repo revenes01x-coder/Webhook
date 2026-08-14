@@ -546,11 +546,6 @@ async def cleanup_unverified_users():
 
 
 async def cleanup_old_plate_data():
-    """
-    Soft delete ข้อมูลป้ายทะเบียนที่เก่าเกิน PLATE_DATA_RETENTION_DAYS วัน
-    ไม่ลบแถวออกจาก database และไม่ลบไฟล์รูปออกจาก disk แค่ set deleted_at
-    ให้ endpoint/รายงานอื่นๆ กรองแถวเหล่านี้ออกได้ (WHERE deleted_at IS NULL)
-    """
     db: Session = SessionLocal()
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=PLATE_DATA_RETENTION_DAYS)
