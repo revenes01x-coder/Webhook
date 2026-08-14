@@ -131,3 +131,43 @@ def send_account_unsuspended_email(to_email: str) -> None:
     </div>
     """
     _send_email(to_email, subject, html)
+
+
+def send_webhook_disabled_email(to_email: str, target_url: str, reason: str | None) -> None:
+    subject = "แจ้งเตือน: Webhook Endpoint ของท่านถูกปิดใช้งานโดยผู้ดูแลระบบ - SmartLPR"
+    safe_url = html_escape(target_url)
+    safe_reason = html_escape(reason) if reason else None
+    reason_html = (
+        f"<p><strong>เหตุผล:</strong> {safe_reason}</p>"
+        if safe_reason
+        else "<p>ไม่มีการระบุเหตุผลเพิ่มเติม</p>"
+    )
+    html = f"""
+    <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+      <p>Webhook Endpoint ต่อไปนี้ของท่านถูกผู้ดูแลระบบปิดใช้งานชั่วคราว</p>
+      <p><strong>URL:</strong> {safe_url}</p>
+      {reason_html}
+      <p>ระหว่างที่ถูกปิดใช้งาน ระบบจะไม่ส่งข้อมูลป้ายทะเบียนใหม่ไปยัง endpoint นี้ จะหยุดส่งข้อมูล
+      ที่ค้างอยู่ในคิวชั่วคราว (ข้อมูลจะไม่หายไปไหน จะถูกส่งต่อทันทีเมื่อเปิดใช้งานอีกครั้ง) และกล้อง
+      ทุกตัวที่ผูกกับ endpoint นี้จะหยุดทำงานชั่วคราวด้วยเช่นกัน</p>
+      <p>หากมีข้อสงสัย กรุณาติดต่อผู้ดูแลระบบเพื่อสอบถามรายละเอียดเพิ่มเติม</p>
+    </div>
+    """
+    _send_email(to_email, subject, html)
+
+
+def send_webhook_enabled_email(to_email: str, target_url: str) -> None:
+    """แจ้ง user ว่า webhook endpoint ถูกเปิดใช้งานกลับมาแล้วโดย admin
+    เรียกคู่กับ send_webhook_disabled_email จากจุดเดียวกัน (set_webhook_status)"""
+    subject = "Webhook Endpoint ของท่านกลับมาใช้งานได้ตามปกติแล้ว - SmartLPR"
+    safe_url = html_escape(target_url)
+    html = f"""
+    <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+      <p>Webhook Endpoint ต่อไปนี้ของท่านถูกผู้ดูแลระบบเปิดใช้งานกลับมาแล้ว</p>
+      <p><strong>URL:</strong> {safe_url}</p>
+      <p>ระบบจะเริ่มส่งข้อมูลป้ายทะเบียนไปยัง endpoint นี้ตามปกติ รวมถึงข้อมูลที่ค้างอยู่ในคิวระหว่าง
+      ที่ถูกปิดใช้งานด้วย และกล้องที่ผูกกับ endpoint นี้จะกลับมาทำงานเองโดยอัตโนมัติเช่นกัน</p>
+      <p>หากมีข้อสงสัย กรุณาติดต่อผู้ดูแลระบบเพื่อสอบถามรายละเอียดเพิ่มเติม</p>
+    </div>
+    """
+    _send_email(to_email, subject, html)

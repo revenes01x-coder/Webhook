@@ -246,13 +246,13 @@ async def process_webhook_queue():
         to_send = []
         for event in events:
             if event.user_id in suspended_user_ids:
-                # เจ้าของ event ถูกระงับอยู่ -> ไม่ส่งจริง แต่ก็ไม่แตะ status/attempt_count/
-                # next_retry_at เลย ปล่อยเป็น pending/failed เหมือนเดิม รอรอบถัดไป (ทุก 30 วิ)
-                # พอ admin ปลดระงับแล้วจะถูกหยิบมาส่งต่อเองโดยอัตโนมัติ ไม่นับเป็นความล้มเหลว
-                # ของ endpoint (ไม่กระทบ circuit breaker) เพราะไม่ใช่ความผิดของปลายทาง
                 continue
 
             endpoint = endpoints_by_id.get(event.webhook_endpoint_id)
+
+            if endpoint and not endpoint.is_active:
+                continue
+
             if endpoint and not endpoint.is_healthy:
                 event.status = "dead_letter"
                 event.next_retry_at = None
@@ -322,6 +322,8 @@ async def process_graveyard_resume():
     """
     Job B — แยกเด็ดขาดจาก Job A ทั้งคิวและ Semaphore (RESUME_CONCURRENCY)
     ทุก 30 นาที: เช็คเฉพาะ endpoint ที่ถูกตัดไฟ (is_healthy=False) ว่าฟื้นหรือยัง
+    (query ตอนต้นฟังก์ชันกรอง is_active=True ไว้อยู่แล้ว — endpoint ที่ admin ปิดใช้งาน
+    (is_active=False) จะไม่ถูกหยิบมา ping เลยแม้จะ unhealthy อยู่ก็ตาม รอจนกว่า admin จะเปิดกลับมา)
     ถ้าฟื้น (ping ตอบ 200) -> เปิดไฟกลับ (is_healthy=True, streak เคลียร์เป็น 0)
     แล้วยิง event dead_letter ของ endpoint นั้นเอง (ไม่ผ่าน Job A เลย)
     """

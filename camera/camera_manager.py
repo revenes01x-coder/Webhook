@@ -31,9 +31,11 @@ def get_active_cameras() -> dict[str, str]:
         cameras = (
             db.query(models.Camera)
             .join(models.User, models.Camera.owner_user_id == models.User.id)
+            .join(models.WebhookEndpoint, models.Camera.webhook_endpoint_id == models.WebhookEndpoint.id)
             .filter(
                 models.Camera.is_active == True,      # noqa: E712
                 models.User.is_suspended == False,     # noqa: E712
+                models.WebhookEndpoint.is_active == True,
             )
             .all()
         )

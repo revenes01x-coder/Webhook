@@ -191,6 +191,28 @@ class WebhookResponse(BaseModel):
         from_attributes = True
 
 
+class WebhookAdminResponse(WebhookResponse):
+    """สำหรับ admin เท่านั้น — เห็นเจ้าของ webhook (user_id) และเหตุผลที่ถูกปิด (ถ้ามี)
+    ใช้กับ GET /admin/webhooks และ PATCH /admin/webhooks/{id}/status"""
+    user_id: int
+    disabled_reason: Optional[str] = None
+
+
+class WebhookStatusUpdate(BaseModel):
+    """ใช้กับ PATCH /admin/webhooks/{id}/status — admin เปิด/ปิด webhook endpoint ตัวใดตัวหนึ่ง
+    admin_note ไม่บังคับ (ใส่เฉพาะตอนปิดก็ได้ — pattern เดียวกับ UserSuspendUpdate)"""
+    is_active: bool
+    admin_note: Optional[str] = Field(default=None, max_length=1000)
+
+    @field_validator("admin_note")
+    @classmethod
+    def strip_note(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip()
+        return v or None  # ถ้าพิมพ์แต่ space ให้ถือว่าไม่ได้ใส่
+
+
 # ---- สำหรับ Access Request (step 3) ----
 class AccessRequestCreate(BaseModel):
     organization_name: str = Field(..., min_length=1, max_length=200)

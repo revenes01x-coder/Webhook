@@ -13,6 +13,8 @@ from services.email_service import (
     send_access_rejected_email,
     send_account_suspended_email,
     send_account_unsuspended_email,
+    send_webhook_disabled_email,
+    send_webhook_enabled_email,
 )
 from smartlpr.pagination import PageParams, paginate
 
@@ -178,3 +180,48 @@ def set_user_suspend_status(
         logging.error(f"ส่งอีเมลแจ้ง{action}บัญชี user_id={user.id} ไม่สำเร็จ: {e}")
 
     return user
+
+
+@router.get("/webhooks", response_model=schemas.PaginatedResponse[schemas.WebhookAdminResponse])
+def list_webhooks(
+    user_id: Optional[int] = Query(default=None, description="กรองเฉพาะ webhook ของ user คนนี้"),
+    page_params: PageParams = Depends(),
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+    """ดู webhook endpoint ทั้งหมดในระบบ ไม่ว่าใครเป็นเจ้าของ"""
+    query = db.query(models.WebhookEndpoint)
+    if user_id is not None:
+        query = query.filter(models.WebhookEndpoint.user_id == user_id)
+    query = query.order_by(models.WebhookEndpoint.id.desc())
+    return paginate(query, page_params)
+
+
+@router.patch("/webhooks/{webhook_id}/status", response_model=schemas.WebhookAdminResponse)
+def set_webhook_status(
+    webhook_id: int,
+    payload: schemas.WebhookStatusUpdate,
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+    endpoint = db.query(models.WebhookEndpoint).filter(models.WebhookEndpoint.id == webhook_id).first()
+    if not endpoint:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ไม่พบ webhook endpoint นี้")
+
+    endpoint.is_active = payload.is_active
+    endpoint.disabled_reason = payload.admin_note if not payload.is_active else None
+    db.commit()
+    db.refresh(endpoint)
+
+    owner = db.query(models.User).filter(models.User.id == endpoint.user_id).first()
+    if owner:
+        try:
+            if endpoint.is_active:
+                send_webhook_enabled_email(owner.email, endpoint.url)
+            else:
+                send_webhook_disabled_email(owner.email, endpoint.url, endpoint.disabled_reason)
+        except RuntimeError as e:
+            action = "เปิด" if endpoint.is_active else "ปิด"
+            logging.error(f"ส่งอีเมลแจ้ง{action}ใช้งาน webhook id={endpoint.id} ไม่สำเร็จ: {e}")
+
+    return endpoint
