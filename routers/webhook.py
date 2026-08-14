@@ -18,7 +18,6 @@ def add_webhook(
     current_user: models.User = Depends(require_access_approved),
 ):
 
-    # [Rate Limit]: ทดสอบ/เพิ่ม URL ได้ 10 ครั้ง / ชั่วโมง / User
     check_rate_limit(db, f"add_webhook_{current_user.id}", "add_webhook", limit=20, window_minutes=60)
 
     url_str = str(webhook.url)

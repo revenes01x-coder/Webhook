@@ -199,7 +199,8 @@ def _apply_send_result(event, endpoint, result_type, error_msg):
 def _notify_endpoints_tripped(db: Session, tripped_endpoints: dict) -> None:
     """ส่งอีเมลแจ้ง user ว่า endpoint ของตัวเองถูกตัดไฟ — เรียกหลัง db.commit() แล้วเท่านั้น
     ไม่ให้ endpoint เดียวกันถูกแจ้งซ้ำในรอบเดียวกัน (tripped_endpoints คีย์ด้วย endpoint.id อยู่แล้ว)
-    ส่งเมลพังไม่กระทบ transaction หลัก (แค่ log error ทิ้ง)"""
+    ส่งเมลพังไม่กระทบ transaction หลัก (แค่ log error ทิ้ง)
+"""
     for endpoint in tripped_endpoints.values():
         owner = db.query(models.User).filter(models.User.id == endpoint.user_id).first()
         if not owner:
@@ -281,7 +282,11 @@ async def process_webhook_queue():
         db.commit()
 
         if to_send and tripped_endpoints:
-            _notify_endpoints_tripped(db, tripped_endpoints)
+            # [Fix - Blocking I/O]: เดิมเรียก _notify_endpoints_tripped(db, tripped_endpoints) ตรงๆ
+            # แบบ sync ในนี้ ซึ่งข้างในยิง SMTP blocking -> ค้าง event loop หลักของทั้งแอปได้นานสุด
+            # ถึง timeout ต่ออีเมล ตอนนี้ห่อด้วย asyncio.to_thread ให้ทำงานบนเธรดแยกแทน
+            # (ดูคำอธิบายเรื่องความปลอดภัยของการส่ง db ข้าม thread ใน docstring ของฟังก์ชันนั้นเอง)
+            await asyncio.to_thread(_notify_endpoints_tripped, db, tripped_endpoints)
 
     except Exception as e:
         db.rollback()
@@ -409,7 +414,9 @@ async def process_graveyard_resume(endpoint_ids: list[int] | None = None):
         db.commit()
 
         if tripped_endpoints:
-            _notify_endpoints_tripped(db, tripped_endpoints)
+            # [Fix - Blocking I/O]: เหมือนจุดเดียวกันใน process_webhook_queue ด้านบน — ห่อด้วย
+            # asyncio.to_thread กัน SMTP ไปค้าง event loop หลักของแอป
+            await asyncio.to_thread(_notify_endpoints_tripped, db, tripped_endpoints)
 
         logging.info(
             f"[Graveyard Resume] endpoint ที่ฟื้น {len(recovered_endpoints)} ตัว, "
