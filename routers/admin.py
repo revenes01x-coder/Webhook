@@ -118,7 +118,7 @@ def list_cameras(
     return {
         "items": [
             schemas.CameraAdminResponse(
-                id=c.id,
+                camera_id=c.id,
                 is_active=c.is_active,
                 verification_status=c.verification_status,
                 created_at=c.created_at,

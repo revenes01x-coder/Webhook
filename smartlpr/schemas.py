@@ -326,8 +326,8 @@ class PartnerCameraCreate(BaseModel):
 
 
 class CameraResponse(BaseModel):
-    """สำหรับ user ทั่วไป — ไม่โชว์ rtsp_url เพราะเป็นข้อมูล sensitive ของกล้อง"""
-    id: str
+
+    camera_id: str
     is_active: bool
     verification_status: str  # pending / verified / failed
     created_at: datetime
@@ -341,14 +341,9 @@ class CameraAdminResponse(CameraResponse):
     rtsp_url: str
     owner_user_id: int
     webhook_is_active: bool
-    
+
 class MyCameraResponse(BaseModel):
-    """สำหรับ GET /my/cameras — กล้องของตัวเอง ไม่โชว์ rtsp_url
-    verification_status: 'pending' = กำลังตรวจสอบอยู่เบื้องหลัง, 'verified' = ต่อ stream ได้จริง,
-    'failed' = ต่อไม่ได้ (เช็ค URL อีกครั้ง)
-    is_active: เปิด/ปิดใช้งานจริง — คุมโดยระบบพาร์ทเนอร์เท่านั้น (ดู routers/partner.py)
-    เจ้าของกล้องไม่มีสิทธิ์ toggle เองอีกต่อไป (endpoint PATCH เดิมถูกถอดออกแล้ว)
-    webhook_url: webhook ปลายทางที่กล้องนี้ผูกไว้ (1 กล้อง : 1 webhook เสมอ)"""
+
     camera_id: str
     is_active: bool
     verification_status: str
