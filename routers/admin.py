@@ -134,6 +134,19 @@ def list_cameras(
         "total_pages": total_pages,
     }
 
+@router.get("/users", response_model=schemas.PaginatedResponse[schemas.UserAdminResponse])
+def list_users(
+    page_params: PageParams = Depends(),
+    db: Session = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+    """ดูรายชื่อ user ทั้งหมดในระบบแบบแบ่งหน้า ใช้กับแท็บ Admin > ผู้ใช้งาน (ตาราง overview)
+    รายละเอียดเจาะลึกรายคน (webhook_count/camera_count/suspended_reason) ยังคงต้องเรียก
+    GET /admin/users/{user_id} แยกต่างหาก (endpoint เดิม ไม่เปลี่ยน)"""
+    query = db.query(models.User).order_by(models.User.id.desc())
+    return paginate(query, page_params)
+
+
 @router.get("/users/{user_id}", response_model=schemas.UserAdminDetailResponse)
 def get_user_detail(
     user_id: int,

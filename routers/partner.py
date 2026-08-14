@@ -76,6 +76,7 @@ def add_camera_from_partner(
         is_active=new_camera.is_active,
         verification_status=new_camera.verification_status,
         webhook_url=webhook.url,
+        webhook_is_active=webhook.is_active,
         created_at=new_camera.created_at,
     )
 
