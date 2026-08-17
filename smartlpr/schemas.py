@@ -365,6 +365,17 @@ class PartnerCameraStatusUpdate(BaseModel):
             raise ValueError("ห้ามเว้นว่าง")
         return v
 
+class PartnerCameraStatusResponse(BaseModel):
+    """ใช้กับ GET /partner/cameras/{camera_id} — ให้ partner poll ดูผลการตรวจสอบเองได้
+    ถ้ากล้องถูกลบไปแล้ว (เกินโควต้าการลองยืนยัน) endpoint จะตอบ 404 แทนที่จะเจอ schema นี้"""
+    camera_id: str
+    verification_status: str
+    verify_attempt_count: int
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
 
 # ---- สำหรับ API Key (ระบบอัตโนมัติของ user ใช้แทน JWT ตอนยิงเข้ามาเอง) ----
 class ApiKeyResponse(BaseModel):

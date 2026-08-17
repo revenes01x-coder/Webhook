@@ -29,7 +29,8 @@ RESUME_CONCURRENCY = 3
 HEALTH_CHECK_TIMEOUT_SECONDS = 5
 
 # Camera RTSP verification: timeout ต่อกล้อง 1 ตัว (วินาที) ตอนลอง connect+อ่านเฟรมจริง
-CAMERA_VERIFY_TIMEOUT_SECONDS = 8
+CAMERA_VERIFY_TIMEOUT_SECONDS = 15
+CAMERA_VERIFY_MAX_ATTEMPTS = 5
 
 
 def _is_valid_ack(event: models.WebhookEvent, response: httpx.Response) -> bool:
@@ -432,15 +433,12 @@ async def process_graveyard_resume(endpoint_ids: list[int] | None = None):
 
 def _try_open_rtsp(rtsp_url: str) -> bool:
     """
-    เรียกใน thread แยก (blocking call จริง) — ลอง connect RTSP แล้วอ่าน 1 เฟรม
+    เรียกใน thread แยก (blocking call จริง) — ลอง connect RTSP แล้วอ่านเฟรม
     หมายเหตุ: cv2.VideoCapture เป็น native blocking call ถ้า network ห่วยมากๆ อาจค้างเกิน
     timeout ที่ตั้งไว้ได้จริง (asyncio.wait_for จะ "เลิกรอ" แต่ thread เบื้องหลังอาจยังค้างอยู่)
-    เป็นข้อจำกัดที่รู้อยู่แล้วของ OpenCV ไม่ใช่บั๊ก — ถ้าต้องการ timeout แม่นยำ 100% ต้องใช้ไลบรารี
-    RTSP แบบ async โดยเฉพาะแทน ซึ่งเกินขอบเขตตอนนี้
+    เป็นข้อจำกัดที่รู้อยู่แล้วของ OpenCV ไม่ใช่บั๊ก
 
-    [SSRF Guard]: pin IP ก่อน connect เสมอ (resolve_rtsp_url_pinned) กัน DNS rebinding —
-    ไม่ใช่แค่เช็คแล้วปล่อยผ่าน hostname เดิม เพราะ cv2.VideoCapture ใช้ FFmpeg resolve DNS
-    เองอีกรอบ ไม่ผ่าน Python เลย (ดู camera_url_guard.resolve_rtsp_url_pinned)
+    [SSRF Guard]: pin IP ก่อน connect เสมอ (resolve_rtsp_url_pinned) กัน DNS rebinding
     """
     try:
         pinned_url = resolve_rtsp_url_pinned(rtsp_url)
@@ -453,9 +451,16 @@ def _try_open_rtsp(rtsp_url: str) -> bool:
         cap = cv2.VideoCapture(pinned_url)
         if not cap.isOpened():
             return False
-        ret, frame = cap.read()
-        return bool(ret and frame is not None)
-    except Exception:
+
+        # ลองอ่านได้สูงสุด 3 เฟรม เผื่อเฟรมแรกๆ ยังว่าง (I-frame ยังไม่มาถึง) ไม่ตัดสิน fail
+        # จากการอ่านครั้งเดียว — ยังอยู่ในกรอบเวลา timeout เดิม (CAMERA_VERIFY_TIMEOUT_SECONDS)
+        for _ in range(3):
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                return True
+        return False
+    except Exception as e:
+        logging.warning(f"[Camera Verify] เปิด RTSP ผิดพลาด: {e}")
         return False
     finally:
         if cap is not None:
@@ -464,24 +469,26 @@ def _try_open_rtsp(rtsp_url: str) -> bool:
 
 async def verify_pending_cameras():
     """
-    Background verification จังหวะที่ 2 (จังหวะที่ 1 คือ SSRF guard ตอน POST /my/cameras)
-    เช็คกล้องที่ verification_status='pending' ทีละตัว ลอง connect RTSP จริงแบบมี timeout
-    ผ่าน -> is_active=True, verification_status='verified'
-    ไม่ผ่าน (ต่อไม่ได้ หรือ timeout) -> verification_status='failed', is_active ยังเป็น False
+    Background verification จังหวะที่ 2 (จังหวะที่ 1 คือ SSRF guard ตอน POST /partner/cameras)
+    เช็คกล้องที่ verification_status อยู่ใน (pending, failed) และยังไม่ครบโควต้าการลอง
+    (verify_attempt_count < CAMERA_VERIFY_MAX_ATTEMPTS) ทีละตัว ลอง connect RTSP จริงแบบมี timeout
 
-    หมายเหตุ deployment: ฟังก์ชันนี้ import cv2 (opencv-python) ซึ่งต้องติดตั้งใน environment
-    เดียวกับที่รัน FastAPI/worker.py ด้วย ไม่ใช่แค่ฝั่ง camera_worker.py เท่านั้น
+    ผ่าน -> is_active=True, verification_status='verified'
+    ไม่ผ่านแต่ยังไม่ครบโควต้า -> verification_status='failed' รอ job รอบหน้าลองใหม่ (ทุก 2 นาที)
+    ไม่ผ่านและครบโควต้าแล้ว -> [Bounded Retry] ลบ row ทิ้งเลย ไม่ค้างเป็น failed ตลอดไป
+    partner จะรู้ผลเองตอนยิง GET /partner/cameras/{id} แล้วเจอ 404 (ดู routers/partner.py)
     """
     db: Session = SessionLocal()
     try:
-        pending_cameras = db.query(models.Camera).filter(
-            models.Camera.verification_status == "pending"
+        cameras_to_check = db.query(models.Camera).filter(
+            models.Camera.verification_status.in_(["pending", "failed"]),
+            models.Camera.verify_attempt_count < CAMERA_VERIFY_MAX_ATTEMPTS,
         ).all()
 
-        if not pending_cameras:
+        if not cameras_to_check:
             return
 
-        for camera in pending_cameras:
+        for camera in cameras_to_check:
             try:
                 is_ok = await asyncio.wait_for(
                     asyncio.to_thread(_try_open_rtsp, camera.rtsp_url),
@@ -490,13 +497,26 @@ async def verify_pending_cameras():
             except asyncio.TimeoutError:
                 is_ok = False
 
+            camera.verify_attempt_count += 1
+
             if is_ok:
                 camera.is_active = True
                 camera.verification_status = "verified"
                 logging.info(f"[Camera Verify] camera id={camera.id} เชื่อมต่อ RTSP สำเร็จ -> verified")
+
+            elif camera.verify_attempt_count >= CAMERA_VERIFY_MAX_ATTEMPTS:
+                logging.warning(
+                    f"[Camera Verify] camera id={camera.id} เชื่อมต่อ RTSP ไม่สำเร็จครบ "
+                    f"{CAMERA_VERIFY_MAX_ATTEMPTS} ครั้ง -> ลบออกจากระบบ (partner ต้องสร้างใหม่เอง)"
+                )
+                db.delete(camera)
+
             else:
                 camera.verification_status = "failed"
-                logging.warning(f"[Camera Verify] camera id={camera.id} เชื่อมต่อ RTSP ไม่สำเร็จ -> failed")
+                logging.warning(
+                    f"[Camera Verify] camera id={camera.id} เชื่อมต่อ RTSP ไม่สำเร็จ "
+                    f"(ครั้งที่ {camera.verify_attempt_count}/{CAMERA_VERIFY_MAX_ATTEMPTS}) -> ลองใหม่รอบหน้า"
+                )
 
         db.commit()
 
@@ -505,7 +525,6 @@ async def verify_pending_cameras():
         logging.error(f"Camera verification job ทำงานผิดพลาด: {e}")
     finally:
         db.close()
-
 
 async def cleanup_unverified_users():
     """

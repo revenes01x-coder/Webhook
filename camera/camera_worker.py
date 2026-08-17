@@ -65,7 +65,7 @@ RESIZE_FACTOR    = 3
 PADDING          = 10
 COOLDOWN_SEC     = 10  # เดิม 3 → เพิ่มเป็น 10 (ลดความถี่การประมวลผลเฟรมโดยรวม)
 RECONNECT_SEC    = 3   # วินาทีที่รอก่อน reconnect กล้อง
-OCR_MIN_CONFIDENCE = 0.60
+OCR_MIN_CONFIDENCE = 0.10
 PLATE_DEDUP_WINDOW_SEC = 60
 # ============================================================
 

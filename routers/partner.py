@@ -112,3 +112,32 @@ def update_camera_status_from_partner(
 
     status_text = "เปิด" if payload.is_active else "ปิด"
     return {"message": f"{status_text}ใช้งานกล้อง '{camera.id}' เรียบร้อยแล้ว"}
+
+@router.get("/cameras/{camera_id}", response_model=schemas.PartnerCameraStatusResponse)
+def get_camera_verification_status(
+    camera_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_api_key),
+):
+    check_rate_limit(db, f"camera_status_check_{current_user.id}", "camera_status_check", limit=20, window_minutes=60)
+
+    camera = db.query(models.Camera).filter(
+        models.Camera.id == camera_id,
+        models.Camera.owner_user_id == current_user.id,
+    ).first()
+    if not camera:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"ไม่พบกล้อง camera_id='{camera_id}' ในบัญชีของคุณ อาจยังไม่เคยสร้างหรือถูกลบ"
+                "ออกจากระบบแล้วเนื่องจากยืนยันการเชื่อมต่อ RTSP ไม่สำเร็จ กรุณาตรวจสอบลิงก์กล้อง"
+                "แล้วลองสร้างใหม่อีกครั้ง"
+            ),
+        )
+
+    return schemas.PartnerCameraStatusResponse(
+        camera_id=camera.id,
+        verification_status=camera.verification_status,
+        verify_attempt_count=camera.verify_attempt_count,
+        is_active=camera.is_active,
+    )

@@ -67,6 +67,7 @@ class Camera(Base):
     webhook_endpoint_id = Column(Integer, ForeignKey("webhook_endpoints.id"), nullable=False, index=True)
     is_active = Column(Boolean, default=False, nullable=False)
     verification_status = Column(String, default="pending", nullable=False, index=True)
+    verify_attempt_count = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
