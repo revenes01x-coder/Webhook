@@ -63,7 +63,7 @@ class Camera(Base):
 
     id = Column(String, primary_key=True, index=True)
     owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    rtsp_url = Column(String, nullable=False)
+    rtsp_url = Column(String, nullable=False, unique=True)
     webhook_endpoint_id = Column(Integer, ForeignKey("webhook_endpoints.id"), nullable=False, index=True)
     is_active = Column(Boolean, default=False, nullable=False)
     verification_status = Column(String, default="pending", nullable=False, index=True)

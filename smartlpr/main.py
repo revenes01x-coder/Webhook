@@ -1,5 +1,7 @@
+import logging
 from fastapi import FastAPI, Depends, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -14,6 +16,8 @@ from smartlpr.security import require_capture_event_secret
 
 models.Base.metadata.create_all(bind=engine)
 
+logger = logging.getLogger("smartlpr")
+
 # Lifespan: สั่งให้ Worker ทำงานตอนเปิดเซิร์ฟเวอร์ และปิด Worker ตอนปิดเซิร์ฟเวอร์
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -24,6 +28,14 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 app = FastAPI(lifespan=lifespan, title="SmartLPR Webhook System")
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception(f"Unhandled error: {request.method} {request.url.path}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "เกิดข้อผิดพลาดที่ไม่คาดคิดในระบบ กรุณาลองใหม่อีกครั้ง หากยังพบปัญหากรุณาติดต่อผู้ดูแลระบบ"},
+    )
 
 # ---------------------------------------------------------------------------
 # CORS — อนุญาตให้หน้า static (index.html ที่รันแยกด้วย `python -m http.server`
