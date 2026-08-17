@@ -5,7 +5,7 @@ from sqlalchemy.orm import Query as SAQuery
 
 T = TypeVar("T")
 
-DEFAULT_PAGE_SIZE = 20
+DEFAULT_PAGE_SIZE = 10
 MAX_PAGE_SIZE = 100
 
 

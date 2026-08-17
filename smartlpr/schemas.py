@@ -370,7 +370,6 @@ class PartnerCameraStatusResponse(BaseModel):
     ถ้ากล้องถูกลบไปแล้ว (เกินโควต้าการลองยืนยัน) endpoint จะตอบ 404 แทนที่จะเจอ schema นี้"""
     camera_id: str
     verification_status: str
-    verify_attempt_count: int
     is_active: bool
 
     class Config:

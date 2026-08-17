@@ -119,7 +119,7 @@ def get_camera_verification_status(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_api_key),
 ):
-    check_rate_limit(db, f"camera_status_check_{current_user.id}", "camera_status_check", limit=20, window_minutes=60)
+    check_rate_limit(db, f"camera_status_check_{current_user.id}", "camera_status_check", limit=60, window_minutes=60)
 
     camera = db.query(models.Camera).filter(
         models.Camera.id == camera_id,
@@ -138,6 +138,5 @@ def get_camera_verification_status(
     return schemas.PartnerCameraStatusResponse(
         camera_id=camera.id,
         verification_status=camera.verification_status,
-        verify_attempt_count=camera.verify_attempt_count,
         is_active=camera.is_active,
     )

@@ -84,7 +84,7 @@ def receive_from_rtsp(
        not _is_valid_capture_path(crop_image_path, camera_id, "crop"):
         return {"status": "ignored", "message": "Pathไฟล์รูปไม่ถูกต้อง"}
 
-    # 2. เจ้าของกล้องคือ owner_user_id ตรงๆ (กล้องเป็นกรรมสิทธิ์ของ user คนเดียว ไม่มี many-to-many แล้ว)
+    # 2. เจ้าของกล้องคือ owner_user_id ตรงๆ (กล้องเป็นกรรมสิทธิ์ของ user คนเดียว )
     owner_user_id = camera.owner_user_id
 
     # 2.5 [Suspend Guard]: เจ้าของกล้องถูกระงับอยู่ -> ไม่สร้าง WebhookEvent ใหม่เข้าคิวเลย
