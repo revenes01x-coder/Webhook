@@ -86,13 +86,23 @@ def review_access_request(
     db.commit()
     db.refresh(req)
 
-    try:
-        if req.status == "approved":
-            send_access_approved_email(req.contact_email)
-        else:
-            send_access_rejected_email(req.contact_email, req.admin_note or _DEFAULT_REJECT_NOTE)
-    except RuntimeError as e:
-        logging.error(f"ส่งอีเมลแจ้งผล access request id={req.id} ไม่สำเร็จ: {e}")
+    owner = db.query(models.User).filter(models.User.id == req.user_id).first()
+
+    if owner:
+        try:
+            if req.status == "approved":
+                send_access_approved_email(owner.email)
+            else:
+                send_access_rejected_email(owner.email, req.admin_note or _DEFAULT_REJECT_NOTE)
+        except RuntimeError as e:
+            logging.error(f"ส่งอีเมลแจ้งผล access request id={req.id} ไม่สำเร็จ: {e}")
+    else:
+        # ไม่ควรเกิดขึ้นจริง (user_id เป็น FK บังคับ ไม่มี user แปลว่าข้อมูลเพี้ยน) — log ไว้เฉยๆ
+        # ไม่ raise เพราะการอนุมัติ/ปฏิเสธ commit ไปแล้วเรียบร้อย ไม่อยากให้ response ล้มเพราะเรื่องนี้
+        logging.error(
+            f"ไม่พบเจ้าของบัญชี (user_id={req.user_id}) สำหรับ access request id={req.id} "
+            "— ข้ามการส่งอีเมลแจ้งผล"
+        )
 
     return req
 
