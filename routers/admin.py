@@ -163,7 +163,9 @@ def get_user_detail(
     db: Session = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    """ดูรายละเอียด user คนเดียว พร้อมจำนวน webhook/camera ที่มี """
+    """ดูรายละเอียด user คนเดียว พร้อมจำนวน webhook/camera ที่มี และประวัติคำขอใช้งานระบบ
+    (access_requests) ทั้งหมดที่เคยส่ง เรียงจากล่าสุดไปเก่าสุด — ใช้โชว์ข้อมูลที่ user กรอกตอน
+    สมัครขอใช้งาน (องค์กร/ผู้ติดต่อ/วัตถุประสงค์) ในโมดัล "รายละเอียดผู้ใช้" ฝั่ง admin"""
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ไม่พบผู้ใช้นี้")
@@ -174,6 +176,14 @@ def get_user_detail(
     camera_count = db.query(models.Camera).filter(
         models.Camera.owner_user_id == user.id
     ).count()
+
+    # เพิ่ม: ดึงคำขอใช้งานทั้งหมดของ user คนนี้ (อาจมีหลายใบถ้าเคยถูกปฏิเสธแล้วส่งใหม่)
+    access_requests = (
+        db.query(models.AccessRequest)
+        .filter(models.AccessRequest.user_id == user.id)
+        .order_by(models.AccessRequest.id.desc())
+        .all()
+    )
 
     return schemas.UserAdminDetailResponse(
         id=user.id,
@@ -186,6 +196,7 @@ def get_user_detail(
         created_at=user.created_at,
         webhook_count=webhook_count,
         camera_count=camera_count,
+        access_requests=access_requests,   # <-- เพิ่มบรรทัดนี้
     )
 
 @router.patch("/users/{user_id}/suspend", response_model=schemas.UserAdminResponse)

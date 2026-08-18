@@ -1,7 +1,7 @@
 import re
 from pydantic import BaseModel, EmailStr, HttpUrl, Field, field_validator, model_validator
 from datetime import datetime
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 
 from smartlpr.pagination import PaginatedResponse  # re-export ให้เรียกผ่าน schemas.PaginatedResponse ได้เหมือนโมเดลอื่น
 
@@ -417,6 +417,7 @@ class UserAdminDetailResponse(UserAdminResponse):
     suspended_reason: Optional[str] = None
     webhook_count: int
     camera_count: int
+    access_requests: List[AccessRequestResponse] = []
 
 
 class UserSuspendUpdate(BaseModel):
