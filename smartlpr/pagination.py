@@ -1,7 +1,9 @@
 from typing import TypeVar, Generic, List
 from pydantic import BaseModel
 from fastapi import Query
-from sqlalchemy.orm import Query as SAQuery
+from sqlalchemy import select, func
+from sqlalchemy.sql import Select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 T = TypeVar("T")
 
@@ -12,7 +14,9 @@ MAX_PAGE_SIZE = 100
 class PageParams:
     """Dependency กลางสำหรับรับ page/page_size จาก query string
     ใช้ร่วมกันได้ทุก endpoint ที่ list ข้อมูล ผ่าน Depends(PageParams)
-    เช่น: page_params: PageParams = Depends()"""
+    เช่น: page_params: PageParams = Depends()
+
+    (ไม่แตะ DB เลย ไม่ต้องเป็น async)"""
 
     def __init__(
         self,
@@ -37,16 +41,13 @@ class PaginatedResponse(BaseModel, Generic[T]):
     total_pages: int
 
 
-def paginate(query: SAQuery, params: PageParams) -> dict:
-    """รับ SQLAlchemy query (ที่ filter/order_by มาเรียบร้อยแล้ว) คืน dict
-    ที่ตรงกับ field ของ PaginatedResponse พอดี (ใช้เป็น return value ของ endpoint ได้เลย
-    FastAPI จะ validate ผ่าน response_model=PaginatedResponse[...] ให้เอง)
+async def paginate(db: AsyncSession, query: Select, params: PageParams) -> dict:
+    count_query = select(func.count()).select_from(query.order_by(None).subquery())
+    total = (await db.execute(count_query)).scalar_one()
 
-    ยิง 2 query: count() (นับทั้งหมดตาม filter ปัจจุบัน) + offset/limit (ดึงเฉพาะหน้านี้)
-    ปลอดภัยและอ่านง่ายกว่าการใช้ window function แบบ query เดียว
-    """
-    total = query.count()
-    items = query.offset(params.offset).limit(params.page_size).all()
+    result = await db.execute(query.offset(params.offset).limit(params.page_size))
+    items = result.scalars().all()
+
     total_pages = (total + params.page_size - 1) // params.page_size if total else 0
     return {
         "items": items,

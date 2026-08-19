@@ -5,7 +5,8 @@ import httpx
 import cv2
 from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy.orm import Session
+from sqlalchemy import select, update, delete
+from sqlalchemy.ext.asyncio import AsyncSession
 from smartlpr import models
 from smartlpr.database import SessionLocal
 from services.email_service import send_webhook_endpoint_unhealthy_email
@@ -30,6 +31,7 @@ CAMERA_VERIFY_MAX_ATTEMPTS = 5
 def _is_valid_ack(event: models.WebhookEvent, response: httpx.Response) -> bool:
     """
     ACK ถูกต้องก็ต่อเมื่อ status 2xx + body เป็น JSON parse ได้ + event_id ตรงกับ source_event_id
+    (ไม่แตะ DB เลย ไม่ต้องเป็น async)
 """
     try:
         body = response.json()
@@ -52,10 +54,7 @@ def _is_valid_ack(event: models.WebhookEvent, response: httpx.Response) -> bool:
 def _read_event_images(event: models.WebhookEvent) -> dict:
     """อ่านไฟล์รูป full/crop แบบ sync (blocking disk I/O) — เรียกผ่าน asyncio.to_thread เท่านั้น
     ไม่ให้ blocking I/O นี้ไปแช่ event loop ตอนมีหลาย event ยิงพร้อมกัน (REALTIME_CONCURRENCY=5 /
-    RESUME_CONCURRENCY=3 ผ่าน asyncio.gather) — หลักการเดียวกับที่ build_pinned_request() ถูกห่อ
-    ด้วย asyncio.to_thread ใน _send_webhook_request() ด้านล่าง (DNS resolve ก็เป็น blocking call
-    เหมือนกัน) ไฟล์นี้ไม่มี ปล่อยให้ FileNotFoundError จาก open() ลอยออกไปให้ caller จับเอง
-    (ดู except FileNotFoundError ใน _send_webhook_request)"""
+    RESUME_CONCURRENCY=3 ผ่าน asyncio.gather)"""
     with open(event.full_image_path, "rb") as f_full, \
          open(event.crop_image_path, "rb") as f_crop:
         return {
@@ -69,10 +68,7 @@ async def _send_webhook_request(client: httpx.AsyncClient, event: models.Webhook
     (กัน sync DB call ไปบล็อก event loop ตอนรันพร้อมกันหลาย coroutine ผ่าน asyncio.gather)"""
 
     # [SSRF Guard]: resolve+เช็ค IP ปลอดภัยซ้ำก่อนยิงจริงทุกครั้ง แล้วต่อ connection ไปยัง IP
-    # ที่ resolve ได้ตรงๆ (ไม่ resolve ซ้ำอีกรอบตอน client.post() เหมือนโค้ดเดิม) ปิดช่อง DNS
-    # rebinding แบบ TOCTOU ได้สมบูรณ์ (โดเมนถูกเปลี่ยน DNS record ระหว่างช่วงเช็คกับช่วงยิงจริง)
-    # เหมือนที่ resolve_rtsp_url_pinned() ปิดให้ฝั่ง RTSP ไปแล้ว — ดู build_pinned_request()
-    # ใน ssrf_guard.py สำหรับรายละเอียดว่าทำไมฝั่ง HTTPS ต้องคง Host header/SNI เป็น hostname เดิม
+    # ที่ resolve ได้ตรงๆ (ไม่ resolve ซ้ำอีกรอบตอน client.post())
     try:
         pinned_url, pin_kwargs = await asyncio.to_thread(build_pinned_request, event.target_url)
     except SSRFBlockedError as e:
@@ -86,9 +82,6 @@ async def _send_webhook_request(client: httpx.AsyncClient, event: models.Webhook
         )
 
     try:
-        # อ่านไฟล์รูป (blocking disk I/O) ใน thread แยก เหมือนหลักการเดียวกับ SSRF check
-        # ด้านบน — ไม่งั้นตอนมีหลาย event วิ่งพร้อมกัน การอ่านไฟล์ของ event หนึ่งจะไปบล็อก
-        # event loop จนกระทบ event อื่นที่กำลังรอ network I/O (client.post) อยู่พร้อมกัน
         files = await asyncio.to_thread(_read_event_images, event)
 
         response = await client.post(
@@ -122,26 +115,28 @@ async def _send_with_semaphore(semaphore: asyncio.Semaphore, client: httpx.Async
     return event, result_type, error_msg
 
 
-def _get_suspended_user_ids(db: Session, user_ids: set) -> set:
+async def _get_suspended_user_ids(db: AsyncSession, user_ids: set) -> set:
     """คืน set ของ user_id ที่ is_suspended=True ในกลุ่ม user_ids ที่ให้มา (query ครั้งเดียว
     ต่อรอบ ไม่ query ทีละ event) ใช้ร่วมกันทั้ง process_webhook_queue และ process_graveyard_resume
     เพื่อกัน event ของ user ที่ถูกระงับไม่ให้ถูกส่งออกไปจริง"""
     if not user_ids:
         return set()
-    rows = db.query(models.User.id).filter(
-        models.User.id.in_(user_ids),
-        models.User.is_suspended == True,  # noqa: E712
-    ).all()
-    return {uid for (uid,) in rows}
+    result = await db.execute(
+        select(models.User.id).filter(
+            models.User.id.in_(user_ids),
+            models.User.is_suspended == True,  # noqa: E712
+        )
+    )
+    return {uid for (uid,) in result.all()}
 
 
 def _mark_endpoint_outcome(endpoint: models.WebhookEndpoint, success: bool) -> bool:
     """
-    Circuit breaker bookkeeping (แค่แก้ attribute เฉยๆ ไม่ commit ในนี้):
+    Circuit breaker bookkeeping (แค่แก้ attribute เฉยๆ ไม่ commit ในนี้) — ไม่แตะ DB โดยตรง
+    เลย เป็นแค่ pure logic บน object ที่โหลดมาแล้ว จึงยังเป็น sync function ได้ตามเดิม:
     - success -> ล้าง streak dead_letter ทิ้ง (มี event ผ่านคั่นกลาง นับ streak ใหม่)
     - ไม่ success (ตกสุสาน) -> เพิ่ม streak ติดกัน ครบ threshold -> ตัดไฟ (is_healthy=False)
     คืนค่า True ถ้าการเรียกครั้งนี้เป็นตัวที่ทำให้เพิ่งตัดไฟ (healthy -> unhealthy) พอดี
-    เพื่อให้ caller รู้ว่าต้องส่งอีเมลแจ้งเตือน user ครั้งเดียวตอนนี้ ไม่ใช่ทุกครั้งที่ยังตัดไฟอยู่
     """
     if success:
         endpoint.consecutive_dead_letters = 0
@@ -156,7 +151,8 @@ def _mark_endpoint_outcome(endpoint: models.WebhookEndpoint, success: bool) -> b
 
 
 def _apply_send_result(event, endpoint, result_type, error_msg):
-    """คืน endpoint ที่ "เพิ่งถูกตัดไฟ" จากการเรียกครั้งนี้ (หรือ None ถ้าไม่มี) ให้ caller เอาไปส่งอีเมลแจ้ง user"""
+    """คืน endpoint ที่ "เพิ่งถูกตัดไฟ" จากการเรียกครั้งนี้ (หรือ None ถ้าไม่มี) ให้ caller เอาไปส่งอีเมลแจ้ง user
+    (แก้ attribute ของ object ที่โหลดมาแล้วเฉยๆ ไม่ query/commit เอง ยังเป็น sync ได้)"""
     now = datetime.now(timezone.utc)
     just_tripped_endpoint = None
 
@@ -176,8 +172,6 @@ def _apply_send_result(event, endpoint, result_type, error_msg):
 
     else:
         # ครอบคลุมทั้ง http_error, ack_mismatch, ssrf_blocked, error ธรรมดา — เข้า retry logic เดียวกันหมด
-        # (ssrf_blocked ก็ถือเป็นความล้มเหลวของ endpoint นี้เหมือนกัน ถ้าเกิดติดกันครบ threshold
-        # circuit breaker จะตัดไฟให้เองเหมือนเหตุผลอื่นๆ ไม่ต้องมี branch พิเศษแยก)
         logging.warning(f"ส่งข้อมูลไม่สำเร็จ Event ID: {event.id} | ประเภท: {result_type} | Error: {error_msg}")
         event.attempt_count += 1
 
@@ -195,17 +189,26 @@ def _apply_send_result(event, endpoint, result_type, error_msg):
     return just_tripped_endpoint
 
 
-def _notify_endpoints_tripped(db: Session, tripped_endpoints: dict) -> None:
+async def _notify_endpoints_tripped(db: AsyncSession, tripped_endpoints: dict) -> None:
     """ส่งอีเมลแจ้ง user ว่า endpoint ของตัวเองถูกตัดไฟ — เรียกหลัง db.commit() แล้วเท่านั้น
     ไม่ให้ endpoint เดียวกันถูกแจ้งซ้ำในรอบเดียวกัน (tripped_endpoints คีย์ด้วย endpoint.id อยู่แล้ว)
     ส่งเมลพังไม่กระทบ transaction หลัก (แค่ log error ทิ้ง)
-"""
+
+    [Async Migration - แก้ half-async trap เดิม]: เดิมฟังก์ชันนี้เป็น sync แล้วถูกเรียกทั้งก้อน
+    ผ่าน `asyncio.to_thread(_notify_endpoints_tripped, db, tripped_endpoints)` — ใช้ได้กับ sync
+    Session เดิม แต่ตอนนี้ db เป็น AsyncSession แล้ว การส่ง AsyncSession ตัวเดียวกันข้าม thread
+    ไปใช้งานแบบนั้นไม่ปลอดภัย (AsyncSession ผูกกับ event loop เดียว ไม่ thread-safe) จึงเปลี่ยน
+    ฟังก์ชันนี้เป็น async โดยตรง (query DB ด้วย await บน event loop หลักตามปกติ) แล้วห่อเฉพาะ
+    ส่วนที่ยังเป็น blocking I/O จริง (สมทลิบ/SMTP ผ่าน send_webhook_endpoint_unhealthy_email)
+    ด้วย asyncio.to_thread ทีละอีเมลแทน — แยก "DB async" ออกจาก "SMTP sync-in-thread" ให้ชัดเจน
+    """
     for endpoint in tripped_endpoints.values():
-        owner = db.query(models.User).filter(models.User.id == endpoint.user_id).first()
+        result = await db.execute(select(models.User).filter(models.User.id == endpoint.user_id))
+        owner = result.scalar_one_or_none()
         if not owner:
             continue
         try:
-            send_webhook_endpoint_unhealthy_email(owner.email, endpoint.url)
+            await asyncio.to_thread(send_webhook_endpoint_unhealthy_email, owner.email, endpoint.url)
         except RuntimeError as e:
             logging.error(f"ส่งอีเมลแจ้งเตือน endpoint ตัดไฟ (id={endpoint.id}) ไม่สำเร็จ: {e}")
 
@@ -216,15 +219,18 @@ async def process_webhook_queue():
     ไม่แตะ dead_letter เลย นั่นเป็นหน้าที่ของ Job B (process_graveyard_resume) โดยเฉพาะ
     ใช้ Semaphore(REALTIME_CONCURRENCY) แยกเด็ดขาดจาก Job B ไม่แย่ง concurrency กัน
     """
-    db: Session = SessionLocal()
+    db: AsyncSession = SessionLocal()
     try:
         now = datetime.now(timezone.utc)
 
-        events = db.query(models.WebhookEvent).filter(
-            models.WebhookEvent.status.in_(["pending", "failed"]),
-            (models.WebhookEvent.next_retry_at <= now) | (models.WebhookEvent.next_retry_at == None),
-            models.WebhookEvent.deleted_at.is_(None),
-        ).all()
+        result = await db.execute(
+            select(models.WebhookEvent).filter(
+                models.WebhookEvent.status.in_(["pending", "failed"]),
+                (models.WebhookEvent.next_retry_at <= now) | (models.WebhookEvent.next_retry_at == None),  # noqa: E711
+                models.WebhookEvent.deleted_at.is_(None),
+            )
+        )
+        events = result.scalars().all()
 
         if not events:
             return
@@ -232,15 +238,13 @@ async def process_webhook_queue():
         endpoint_ids = {e.webhook_endpoint_id for e in events if e.webhook_endpoint_id}
         endpoints_by_id = {}
         if endpoint_ids:
-            endpoints_by_id = {
-                ep.id: ep
-                for ep in db.query(models.WebhookEndpoint).filter(
-                    models.WebhookEndpoint.id.in_(endpoint_ids)
-                ).all()
-            }
+            eps_result = await db.execute(
+                select(models.WebhookEndpoint).filter(models.WebhookEndpoint.id.in_(endpoint_ids))
+            )
+            endpoints_by_id = {ep.id: ep for ep in eps_result.scalars().all()}
 
         # [Suspend Guard]: หาว่า event ไหนเป็นของ user ที่ถูกระงับอยู่ตอนนี้บ้าง (query ครั้งเดียว)
-        suspended_user_ids = _get_suspended_user_ids(db, {e.user_id for e in events if e.user_id})
+        suspended_user_ids = await _get_suspended_user_ids(db, {e.user_id for e in events if e.user_id})
 
         # Circuit breaker: endpoint ถูกตัดไฟอยู่ -> ข้าม 3 รอบ retry ไปเลย เข้าสุสานทันที ประหยัดเวลา
         to_send = []
@@ -278,27 +282,21 @@ async def process_webhook_queue():
                 if just_tripped:
                     tripped_endpoints[just_tripped.id] = just_tripped
 
-        db.commit()
+        await db.commit()
 
         if to_send and tripped_endpoints:
-            # [Fix - Blocking I/O]: เดิมเรียก _notify_endpoints_tripped(db, tripped_endpoints) ตรงๆ
-            # แบบ sync ในนี้ ซึ่งข้างในยิง SMTP blocking -> ค้าง event loop หลักของทั้งแอปได้นานสุด
-            # ถึง timeout ต่ออีเมล ตอนนี้ห่อด้วย asyncio.to_thread ให้ทำงานบนเธรดแยกแทน
-            # (ดูคำอธิบายเรื่องความปลอดภัยของการส่ง db ข้าม thread ใน docstring ของฟังก์ชันนั้นเอง)
-            await asyncio.to_thread(_notify_endpoints_tripped, db, tripped_endpoints)
+            await _notify_endpoints_tripped(db, tripped_endpoints)
 
     except Exception as e:
-        db.rollback()
+        await db.rollback()
         logging.error(f"Background Worker (realtime) ทำงานผิดพลาด: {e}")
     finally:
-        db.close()
+        await db.close()
 
 
 async def _ping_endpoint(client: httpx.AsyncClient, url: str) -> bool:
     # [SSRF Guard]: resolve+เช็ค IP ปลอดภัยซ้ำก่อนยิงจริงเหมือน _send_webhook_request แล้วต่อ
-    # connection ไปยัง IP ที่ resolve ได้ตรงๆ (ไม่ resolve ซ้ำตอน client.post()) — endpoint ที่
-    # ถูกตัดไฟอาจโดน DNS rebinding ระหว่างที่ตัดไฟอยู่ก็ได้ ไม่ควรถือว่า "ฟื้น" แค่เพราะ ping ผ่าน
-    # ด้วย hostname ที่อาจไม่ได้ต่อไปยัง IP เดียวกับที่เช็คจริง
+    # connection ไปยัง IP ที่ resolve ได้ตรงๆ (ไม่ resolve ซ้ำตอน client.post())
     try:
         pinned_url, pin_kwargs = await asyncio.to_thread(build_pinned_request, url)
     except SSRFBlockedError as e:
@@ -306,7 +304,7 @@ async def _ping_endpoint(client: httpx.AsyncClient, url: str) -> bool:
         return False
 
     try:
-        test_event_id, dummy_payload, dummy_files = build_test_webhook_payload()
+        test_event_id, dummy_payload, dummy_files = await asyncio.to_thread(build_test_webhook_payload)
 
         response = await client.post(
             pinned_url, data=dummy_payload, files=dummy_files, timeout=HEALTH_CHECK_TIMEOUT_SECONDS,
@@ -328,23 +326,20 @@ async def process_graveyard_resume(endpoint_ids: list[int] | None = None):
     """
     Job B — แยกเด็ดขาดจาก Job A ทั้งคิวและ Semaphore (RESUME_CONCURRENCY)
     ทุก 30 นาที (default): เช็คเฉพาะ endpoint ที่ถูกตัดไฟ (is_healthy=False) ว่าฟื้นหรือยัง
-    ...(docstring เดิม)...
 
     endpoint_ids: ไม่ระบุ (None) = พฤติกรรมเดิมทุกประการ (เรียกจาก scheduler ทุก 30 นาที)
     ระบุมา = จำกัด scope เฉพาะ endpoint ที่ระบุ ใช้ตอน routers/admin.py:set_webhook_status
-    เรียกทันทีหลัง admin เปิด endpoint ที่เคยถูกตัดไฟกลับมา (ผ่าน resume_endpoint_now ด้านล่าง)
-    ไม่ต้องรอ cron รอบถัดไป — logic ที่เหลือเหมือนเดิมทุกอย่าง ยังต้อง ping สำเร็จจริงก่อนถึงจะ
-    ปลดล็อกและ resume ไม่ได้ trust คำสั่ง admin เฉยๆ
+    เรียกทันทีหลัง admin เปิด endpoint ที่เคยถูกตัดไฟกลับมา
     """
-    db: Session = SessionLocal()
+    db: AsyncSession = SessionLocal()
     try:
-        query = db.query(models.WebhookEndpoint).filter(
+        query = select(models.WebhookEndpoint).filter(
             models.WebhookEndpoint.is_healthy == False,  # noqa: E712
             models.WebhookEndpoint.is_active == True,
         )
         if endpoint_ids is not None:
             query = query.filter(models.WebhookEndpoint.id.in_(endpoint_ids))
-        unhealthy_endpoints = query.all()
+        unhealthy_endpoints = (await db.execute(query)).scalars().all()
 
         if not unhealthy_endpoints:
             return
@@ -358,17 +353,20 @@ async def process_graveyard_resume(endpoint_ids: list[int] | None = None):
                     recovered_endpoints.append(endpoint)
 
             # เปิดไฟให้ endpoint ที่ฟื้นก่อน commit ทันที แม้ resume ด้านล่างจะพังก็ไม่เสีย progress ตรงนี้
-            db.commit()
+            await db.commit()
 
             if not recovered_endpoints:
                 return
 
             recovered_ids = [ep.id for ep in recovered_endpoints]
-            dead_events = db.query(models.WebhookEvent).filter(
-                models.WebhookEvent.webhook_endpoint_id.in_(recovered_ids),
-                models.WebhookEvent.status == "dead_letter",
-                models.WebhookEvent.deleted_at.is_(None),
-            ).all()
+            dead_events_result = await db.execute(
+                select(models.WebhookEvent).filter(
+                    models.WebhookEvent.webhook_endpoint_id.in_(recovered_ids),
+                    models.WebhookEvent.status == "dead_letter",
+                    models.WebhookEvent.deleted_at.is_(None),
+                )
+            )
+            dead_events = dead_events_result.scalars().all()
 
             if not dead_events:
                 logging.info(
@@ -378,9 +376,8 @@ async def process_graveyard_resume(endpoint_ids: list[int] | None = None):
                 return
 
             # [Suspend Guard]: endpoint ฟื้นแล้วก็จริง แต่ถ้าเจ้าของ event ยังถูกระงับอยู่ ไม่ควร
-            # resume ส่งให้ — ตัดออกจากรอบนี้ไปก่อน (ยังคงเป็น dead_letter เหมือนเดิม รอ Job B
-            # รอบถัดไปตอนที่ endpoint ยังฟื้นอยู่ และเจ้าของถูกปลดระงับแล้วค่อยลองใหม่)
-            suspended_user_ids = _get_suspended_user_ids(db, {e.user_id for e in dead_events if e.user_id})
+            # resume ส่งให้ — ตัดออกจากรอบนี้ไปก่อน
+            suspended_user_ids = await _get_suspended_user_ids(db, {e.user_id for e in dead_events if e.user_id})
             skipped_suspended = [e for e in dead_events if e.user_id in suspended_user_ids]
             dead_events = [e for e in dead_events if e.user_id not in suspended_user_ids]
 
@@ -412,12 +409,10 @@ async def process_graveyard_resume(endpoint_ids: list[int] | None = None):
                     if _mark_endpoint_outcome(endpoint, success=False):
                         tripped_endpoints[endpoint.id] = endpoint
 
-        db.commit()
+        await db.commit()
 
         if tripped_endpoints:
-            # [Fix - Blocking I/O]: เหมือนจุดเดียวกันใน process_webhook_queue ด้านบน — ห่อด้วย
-            # asyncio.to_thread กัน SMTP ไปค้าง event loop หลักของแอป
-            await asyncio.to_thread(_notify_endpoints_tripped, db, tripped_endpoints)
+            await _notify_endpoints_tripped(db, tripped_endpoints)
 
         logging.info(
             f"[Graveyard Resume] endpoint ที่ฟื้น {len(recovered_endpoints)} ตัว, "
@@ -425,20 +420,17 @@ async def process_graveyard_resume(endpoint_ids: list[int] | None = None):
         )
 
     except Exception as e:
-        db.rollback()
+        await db.rollback()
         logging.error(f"Graveyard resume job ทำงานผิดพลาด: {e}")
     finally:
-        db.close()
+        await db.close()
 
 
 def _try_open_rtsp(rtsp_url: str) -> bool:
     """
     เรียกใน thread แยก (blocking call จริง) — ลอง connect RTSP แล้วอ่านเฟรม
-    หมายเหตุ: cv2.VideoCapture เป็น native blocking call ถ้า network ห่วยมากๆ อาจค้างเกิน
-    timeout ที่ตั้งไว้ได้จริง (asyncio.wait_for จะ "เลิกรอ" แต่ thread เบื้องหลังอาจยังค้างอยู่)
-    เป็นข้อจำกัดที่รู้อยู่แล้วของ OpenCV ไม่ใช่บั๊ก
-
     [SSRF Guard]: pin IP ก่อน connect เสมอ (resolve_rtsp_url_pinned) กัน DNS rebinding
+    (ไม่แตะ DB เลย ยังเป็น sync function ตามเดิม — worker.py เรียกผ่าน asyncio.to_thread)
     """
     try:
         pinned_url = resolve_rtsp_url_pinned(rtsp_url)
@@ -452,8 +444,6 @@ def _try_open_rtsp(rtsp_url: str) -> bool:
         if not cap.isOpened():
             return False
 
-        # ลองอ่านได้สูงสุด 3 เฟรม เผื่อเฟรมแรกๆ ยังว่าง (I-frame ยังไม่มาถึง) ไม่ตัดสิน fail
-        # จากการอ่านครั้งเดียว — ยังอยู่ในกรอบเวลา timeout เดิม (CAMERA_VERIFY_TIMEOUT_SECONDS)
         for _ in range(3):
             ret, frame = cap.read()
             if ret and frame is not None:
@@ -471,19 +461,20 @@ async def verify_pending_cameras():
     """
     Background verification จังหวะที่ 2 (จังหวะที่ 1 คือ SSRF guard ตอน POST /partner/cameras)
     เช็คกล้องที่ verification_status อยู่ใน (pending, failed) และยังไม่ครบโควต้าการลอง
-    (verify_attempt_count < CAMERA_VERIFY_MAX_ATTEMPTS) ทีละตัว ลอง connect RTSP จริงแบบมี timeout
 
     ผ่าน -> is_active=True, verification_status='verified'
     ไม่ผ่านแต่ยังไม่ครบโควต้า -> verification_status='failed' รอ job รอบหน้าลองใหม่ (ทุก 1 นาที)
     ไม่ผ่านและครบโควต้าแล้ว -> [Bounded Retry] ลบ row ทิ้งเลย ไม่ค้างเป็น failed ตลอดไป
-    partner จะรู้ผลเองตอนยิง GET /partner/cameras/{id} แล้วเจอ 404 (ดู routers/partner.py)
     """
-    db: Session = SessionLocal()
+    db: AsyncSession = SessionLocal()
     try:
-        cameras_to_check = db.query(models.Camera).filter(
-            models.Camera.verification_status.in_(["pending", "failed"]),
-            models.Camera.verify_attempt_count < CAMERA_VERIFY_MAX_ATTEMPTS,
-        ).all()
+        result = await db.execute(
+            select(models.Camera).filter(
+                models.Camera.verification_status.in_(["pending", "failed"]),
+                models.Camera.verify_attempt_count < CAMERA_VERIFY_MAX_ATTEMPTS,
+            )
+        )
+        cameras_to_check = result.scalars().all()
 
         if not cameras_to_check:
             return
@@ -509,7 +500,7 @@ async def verify_pending_cameras():
                     f"[Camera Verify] camera id={camera.id} เชื่อมต่อ RTSP ไม่สำเร็จครบ "
                     f"{CAMERA_VERIFY_MAX_ATTEMPTS} ครั้ง -> ลบออกจากระบบ (partner ต้องสร้างใหม่เอง)"
                 )
-                db.delete(camera)
+                await db.delete(camera)
 
             else:
                 camera.verification_status = "failed"
@@ -518,136 +509,134 @@ async def verify_pending_cameras():
                     f"(ครั้งที่ {camera.verify_attempt_count}/{CAMERA_VERIFY_MAX_ATTEMPTS}) -> ลองใหม่รอบหน้า"
                 )
 
-        db.commit()
+        await db.commit()
 
     except Exception as e:
-        db.rollback()
+        await db.rollback()
         logging.error(f"Camera verification job ทำงานผิดพลาด: {e}")
     finally:
-        db.close()
+        await db.close()
 
 async def cleanup_unverified_users():
     """
     ลบ user ที่สมัครแล้วไม่ยืนยัน OTP ภายในเวลาที่กำหนด (hard delete)
     เกณฑ์: created_at เกิน UNVERIFIED_USER_EXPIRE_HOURS ชั่วโมง และ is_verified == False
     ลบ OtpVerification ที่ผูกกับ user นั้นก่อน (กัน FK constraint) แล้วค่อยลบ user
-    ไม่แตะ user ที่ verify แล้ว ไม่ว่าจะสมัครมานานแค่ไหน
     """
-    db: Session = SessionLocal()
+    db: AsyncSession = SessionLocal()
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=UNVERIFIED_USER_EXPIRE_HOURS)
 
-        stale_users = db.query(models.User).filter(
-            models.User.is_verified == False,  # noqa: E712
-            models.User.created_at <= cutoff,
-        ).all()
+        result = await db.execute(
+            select(models.User).filter(
+                models.User.is_verified == False,  # noqa: E712
+                models.User.created_at <= cutoff,
+            )
+        )
+        stale_users = result.scalars().all()
 
         if not stale_users:
             return
 
         for user in stale_users:
-            db.query(models.OtpVerification).filter(
-                models.OtpVerification.user_id == user.id
-            ).delete(synchronize_session=False)
+            await db.execute(
+                delete(models.OtpVerification).where(models.OtpVerification.user_id == user.id)
+            )
             logging.info(
                 f"ลบ user ที่ไม่ verify เกิน {UNVERIFIED_USER_EXPIRE_HOURS} ชม.: "
                 f"{user.email} (id={user.id}, สมัครเมื่อ {user.created_at})"
             )
-            db.delete(user)
+            await db.delete(user)
 
-        db.commit()
+        await db.commit()
 
     except Exception as e:
-        db.rollback()
+        await db.rollback()
         logging.error(f"Cleanup unverified users ทำงานผิดพลาด: {e}")
     finally:
-        db.close()
+        await db.close()
 
 
 async def cleanup_old_plate_data():
-    db: Session = SessionLocal()
+    db: AsyncSession = SessionLocal()
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=PLATE_DATA_RETENTION_DAYS)
         now = datetime.now(timezone.utc)
 
-        result = db.query(models.WebhookEvent).filter(
-            models.WebhookEvent.created_at <= cutoff,
-            models.WebhookEvent.deleted_at.is_(None),
-        ).update({"deleted_at": now}, synchronize_session=False)
+        result = await db.execute(
+            update(models.WebhookEvent)
+            .where(
+                models.WebhookEvent.created_at <= cutoff,
+                models.WebhookEvent.deleted_at.is_(None),
+            )
+            .values(deleted_at=now)
+        )
 
-        db.commit()
+        await db.commit()
 
-        if result:
+        if result.rowcount:
             logging.info(
                 f"Soft delete ข้อมูลป้ายทะเบียนที่เก็บเกิน {PLATE_DATA_RETENTION_DAYS} วัน "
-                f"จำนวน {result} รายการ"
+                f"จำนวน {result.rowcount} รายการ"
             )
 
     except Exception as e:
-        db.rollback()
+        await db.rollback()
         logging.error(f"Cleanup ข้อมูลป้ายทะเบียนเก่าทำงานผิดพลาด: {e}")
     finally:
-        db.close()
+        await db.close()
 
 async def cleanup_expired_revoked_tokens():
-    """ลบ record ใน revoked_tokens ที่ revoked_expires_at ผ่านไปแล้ว
-    (token หมดอายุไปเองตามธรรมชาติแล้ว ไม่มีประโยชน์ต้องเก็บ record ไว้เช็คต่อ)"""
-    db: Session = SessionLocal()
+    """ลบ record ใน revoked_tokens ที่ revoked_expires_at ผ่านไปแล้ว"""
+    db: AsyncSession = SessionLocal()
     try:
         now = datetime.now(timezone.utc)
-        result = db.query(models.RevokedToken).filter(
-            models.RevokedToken.revoked_expires_at <= now,
-        ).delete(synchronize_session=False)
-        db.commit()
-        if result:
-            logging.info(f"ลบ revoked token ที่หมดอายุไปแล้ว {result} รายการ")
+        result = await db.execute(
+            delete(models.RevokedToken).where(models.RevokedToken.revoked_expires_at <= now)
+        )
+        await db.commit()
+        if result.rowcount:
+            logging.info(f"ลบ revoked token ที่หมดอายุไปแล้ว {result.rowcount} รายการ")
     except Exception as e:
-        db.rollback()
+        await db.rollback()
         logging.error(f"Cleanup revoked tokens ทำงานผิดพลาด: {e}")
     finally:
-        db.close()
+        await db.close()
 
 
 async def cleanup_expired_refresh_tokens():
-    """ลบ refresh token ที่หมดอายุไปแล้ว (ไม่ว่าจะเคยถูก rotate/revoke ไปก่อนหน้าหรือไม่ก็ตาม)
-    เกณฑ์เดียวคือ expires_at ผ่านไปแล้ว — ไม่มีประโยชน์ต้องเก็บไว้ต่อเพราะยืนยันตัวตนอะไรไม่ได้แล้ว
-    (แถวที่ revoked_at ไม่ใช่ None แต่ expires_at ยังไม่ถึง จะยังไม่ถูกลบ เผื่อไว้ตรวจสอบ/debug replay ย้อนหลัง)"""
-    db: Session = SessionLocal()
+    """ลบ refresh token ที่หมดอายุไปแล้ว (ไม่ว่าจะเคยถูก rotate/revoke ไปก่อนหน้าหรือไม่ก็ตาม)"""
+    db: AsyncSession = SessionLocal()
     try:
         now = datetime.now(timezone.utc)
-        result = db.query(models.RefreshToken).filter(
-            models.RefreshToken.expires_at <= now,
-        ).delete(synchronize_session=False)
-        db.commit()
-        if result:
-            logging.info(f"ลบ refresh token ที่หมดอายุไปแล้ว {result} รายการ")
+        result = await db.execute(
+            delete(models.RefreshToken).where(models.RefreshToken.expires_at <= now)
+        )
+        await db.commit()
+        if result.rowcount:
+            logging.info(f"ลบ refresh token ที่หมดอายุไปแล้ว {result.rowcount} รายการ")
     except Exception as e:
-        db.rollback()
+        await db.rollback()
         logging.error(f"Cleanup refresh tokens ทำงานผิดพลาด: {e}")
     finally:
-        db.close()
+        await db.close()
 
 async def cleanup_old_otp_records():
-    """ลบ OtpVerification ที่ค้างเกิน OTP_RETENTION_DAYS นับจากวันหมดอายุ
-    (เคส happy path — verify สำเร็จ — ถูกลบทันทีที่ verify_otp_endpoint/verify_reset_otp
-    อยู่แล้ว ไม่ผ่าน job นี้ ดังนั้นแถวที่เหลือใน DB คือเคสที่ค้าง เช่น ขอ OTP แล้วไม่มา
-    verify ต่อ หรือกรอกผิดจนครบโควต้า (attempt_count >= OTP_MAX_ATTEMPTS))
-    ใช้ expires_at เป็นเกณฑ์ ไม่ใช้ is_used เพราะ record ที่ยังไม่หมดอายุ (user อาจกำลัง
-    กรอกอยู่จริงๆ) ไม่ควรถูกลบทั้งที่ is_used ยังเป็น False ปกติ"""
-    db: Session = SessionLocal()
+    """ลบ OtpVerification ที่ค้างเกิน OTP_RETENTION_DAYS นับจากวันหมดอายุ"""
+    db: AsyncSession = SessionLocal()
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=OTP_RETENTION_DAYS)
-        result = db.query(models.OtpVerification).filter(
-            models.OtpVerification.expires_at <= cutoff,
-        ).delete(synchronize_session=False)
-        db.commit()
-        if result:
-            logging.info(f"ลบ OTP record ที่หมดอายุไปแล้ว {result} รายการ")
+        result = await db.execute(
+            delete(models.OtpVerification).where(models.OtpVerification.expires_at <= cutoff)
+        )
+        await db.commit()
+        if result.rowcount:
+            logging.info(f"ลบ OTP record ที่หมดอายุไปแล้ว {result.rowcount} รายการ")
     except Exception as e:
-        db.rollback()
+        await db.rollback()
         logging.error(f"Cleanup OTP records ทำงานผิดพลาด: {e}")
     finally:
-        db.close()
+        await db.close()
 
 async def resume_endpoint_now(endpoint_id: int) -> None:
     await process_graveyard_resume(endpoint_ids=[endpoint_id])

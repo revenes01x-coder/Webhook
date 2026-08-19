@@ -3,12 +3,13 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status, Header
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from smartlpr.database import get_db
 from smartlpr.config import SECRET_KEY, ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES, PASSWORD_RESET_TOKEN_EXPIRE_MINUTES, CAPTURE_EVENT_SECRET
 from services.token import hash_api_key
 from smartlpr import models
-import uuid 
+import uuid
 import hmac
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -42,8 +43,7 @@ def create_password_reset_token(email: str) -> str:
     มี jti เหมือน access token (create_access_token) — เพื่อให้ single-use ได้: หลังใช้
     ตั้งรหัสผ่านสำเร็จ 1 ครั้ง routers/auth.py:reset_password จะเรียก revoke_token(db, token)
     บันทึก jti นี้ลง revoked_tokens ทันที ป้องกันเอา token ใบเดิมมาใช้ตั้งรหัสผ่านซ้ำได้อีก
-    ในช่วงที่ยังไม่หมดอายุตามเวลา (เดิมไม่มี jti เลย เลยตั้งรหัสผ่านซ้ำกี่ครั้งก็ได้ด้วย
-    token ใบเดียวตราบใดที่ยังไม่ครบ 10 นาที)"""
+    ในช่วงที่ยังไม่หมดอายุตามเวลา"""
     expire = datetime.now(timezone.utc) + timedelta(minutes=PASSWORD_RESET_TOKEN_EXPIRE_MINUTES)
     to_encode = {
         "sub": email,
@@ -54,13 +54,11 @@ def create_password_reset_token(email: str) -> str:
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def decode_password_reset_token(token: str, db: Session) -> str:
+async def decode_password_reset_token(token: str, db: AsyncSession) -> str:
     """ตรวจ token จาก create_password_reset_token คืน email ถ้าถูกต้อง ไม่งั้น raise HTTPException
 
-    ต้องรับ db เพิ่มแล้ว (เดิมไม่ต้องใช้) — เพื่อเช็คว่า jti นี้เคยถูก revoke ไปแล้วหรือยัง
-    ผ่าน is_token_revoked() ตัวเดียวกับที่ get_current_user ใช้เช็ค access token ถ้าเคยถูก
-    ใช้ตั้งรหัสผ่านไปแล้วรอบก่อนหน้า (revoke_token ถูกเรียกตอนนั้น) ให้ถือว่าใช้ไม่ได้อีก
-    ต่อให้ยังไม่หมดอายุตามเวลาก็ตาม (บังคับ single-use)"""
+    [Async Migration]: เดิม sync ตอนนี้ async เพราะข้างในเรียก is_token_revoked() ที่ query DB
+    ต้อง await ทั้งฟังก์ชันนี้และ caller (routers/auth.py: reset_password) เลยต้อง await ตาม"""
     invalid_exception = HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail="ลิงก์/token สำหรับตั้งรหัสผ่านใหม่ไม่ถูกต้องหรือหมดอายุ กรุณาขอ OTP ใหม่อีกครั้ง",
@@ -78,19 +76,18 @@ def decode_password_reset_token(token: str, db: Session) -> str:
     if not email or not jti:
         raise invalid_exception
 
-    if is_token_revoked(db, jti):
+    if await is_token_revoked(db, jti):
         raise invalid_exception
 
     return email
 
-def revoke_token(db: Session, token: str) -> None:
+
+async def revoke_token(db: AsyncSession, token: str) -> None:
     """ถอด jti + exp ออกจาก token แล้วบันทึกลง revoked_tokens
     Idempotent: ถ้า jti นี้ถูก revoke ไปแล้ว (เช่นกด logout ซ้ำ) ไม่ error
-    token ที่ decode ไม่ผ่าน หรือไม่มี jti/exp (token เก่าก่อน deploy ฟีเจอร์นี้) จะเงียบๆ ไม่ทำอะไร
-    เพราะ token แบบนั้นใช้ไม่ได้อยู่แล้ว หรือปล่อยให้หมดอายุเองตามปกติ
+    token ที่ decode ไม่ผ่าน หรือไม่มี jti/exp จะเงียบๆ ไม่ทำอะไร
 
-    ใช้ร่วมกันทั้ง access token (logout) และ password reset token (reset-password สำเร็จ)
-    เพราะฟังก์ชันนี้สนใจแค่ jti/exp เท่านั้น ไม่สนใจ claim อื่นๆ หรือ purpose ของ token เลย"""
+    ใช้ร่วมกันทั้ง access token (logout) และ password reset token (reset-password สำเร็จ)"""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
@@ -101,7 +98,8 @@ def revoke_token(db: Session, token: str) -> None:
     if not jti or not exp:
         return
 
-    existing = db.query(models.RevokedToken).filter(models.RevokedToken.jti == jti).first()
+    result = await db.execute(select(models.RevokedToken).filter(models.RevokedToken.jti == jti))
+    existing = result.scalar_one_or_none()
     if existing:
         return
 
@@ -109,16 +107,17 @@ def revoke_token(db: Session, token: str) -> None:
         jti=jti,
         revoked_expires_at=datetime.fromtimestamp(exp, tz=timezone.utc),
     ))
-    db.commit()
+    await db.commit()
 
 
-def is_token_revoked(db: Session, jti: str | None) -> bool:
+async def is_token_revoked(db: AsyncSession, jti: str | None) -> bool:
     if not jti:
         return False
-    return db.query(models.RevokedToken).filter(models.RevokedToken.jti == jti).first() is not None
+    result = await db.execute(select(models.RevokedToken).filter(models.RevokedToken.jti == jti))
+    return result.scalar_one_or_none() is not None
 
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="ไม่สามารถยืนยันตัวตนได้ (Token อาจหมดอายุ)",
@@ -133,10 +132,11 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     except JWTError:
         raise credentials_exception
 
-    if is_token_revoked(db, jti):
+    if await is_token_revoked(db, jti):
         raise credentials_exception
 
-    user = db.query(models.User).filter(models.User.email == email).first()
+    result = await db.execute(select(models.User).filter(models.User.email == email))
+    user = result.scalar_one_or_none()
     if user is None:
         raise credentials_exception
     return user
@@ -150,6 +150,11 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 # ยัง login/ดูข้อมูลของตัวเองได้ปกติ แต่จะถูกบล็อกเฉพาะตอนทำ action สำคัญ ผ่าน
 # require_access_approved (เพิ่ม webhook, ขอ/regenerate API key) และ require_api_key
 # (ระบบอัตโนมัติของ user ยิงเข้ามาเอง เช่น POST /my/cameras) เท่านั้น
+#
+# [Async Migration]: require_admin, require_terms_accepted ไม่แตะ DB เลย (แค่เช็ค attribute
+# ของ current_user ที่ get_current_user โหลดมาให้แล้ว) จึงยังเป็น sync def ได้ตามเดิม —
+# FastAPI รองรับ dependency chain ที่ผสม sync/async ปนกันได้ปกติ (sync ตัวไหนไม่มี I/O ก็
+# รันเร็วอยู่แล้ว ไม่จำเป็นต้องแปลงเป็น async ทุกจุด)
 # ---------------------------------------------------------------------------
 
 def require_admin(current_user: models.User = Depends(get_current_user)) -> models.User:
@@ -172,9 +177,9 @@ def require_terms_accepted(
     return current_user
 
 
-def require_access_approved(
+async def require_access_approved(
     current_user: models.User = Depends(require_terms_accepted),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> models.User:
     # [Suspend Guard]: user ที่ถูก admin ระงับ ทำ action สำคัญ (เพิ่ม webhook, ขอ/regenerate
     # API key) ไม่ได้ ถึงแม้จะเคยผ่าน terms + access approved มาแล้วก็ตาม — login ยังทำได้ปกติ
@@ -185,14 +190,13 @@ def require_access_approved(
             detail="บัญชีนี้ถูกระงับการใช้งานชั่วคราว กรุณาติดต่อผู้ดูแลระบบ",
         )
 
-    approved = (
-        db.query(models.AccessRequest)
-        .filter(
+    result = await db.execute(
+        select(models.AccessRequest).filter(
             models.AccessRequest.user_id == current_user.id,
             models.AccessRequest.status == "approved",
         )
-        .first()
     )
+    approved = result.scalar_one_or_none()
     if not approved:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -205,9 +209,9 @@ def require_access_approved(
 # ใช้กับ endpoint ที่ระบบภายนอกยิงเข้ามาแบบไม่มีคนกด เช่น POST /my/cameras
 # ---------------------------------------------------------------------------
 
-def require_api_key(
+async def require_api_key(
     x_api_key: str = Header(..., description="API key ที่ได้จาก POST /my/api-key/regenerate"),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ) -> models.User:
     """เช็ค header X-API-Key เทียบกับ User.api_key_hash โดย hash ที่ส่งมาแล้ว query ตรงๆ
     (deterministic hash เลย query ได้เลย ไม่ต้อง loop เทียบทีละ user)"""
@@ -221,7 +225,8 @@ def require_api_key(
         raise invalid_exception
 
     hashed = hash_api_key(x_api_key)
-    user = db.query(models.User).filter(models.User.api_key_hash == hashed).first()
+    result = await db.execute(select(models.User).filter(models.User.api_key_hash == hashed))
+    user = result.scalar_one_or_none()
     if not user:
         raise invalid_exception
 
@@ -240,7 +245,8 @@ def require_capture_event_secret(
     x_capture_secret: str = Header(..., alias="X-Capture-Secret"),
 ) -> None:
     """ยืนยันว่า POST /capture-event มาจาก camera_worker.py ของระบบเราเองเท่านั้น
-    ใช้ hmac.compare_digest กัน timing attack เหมือน verify_otp/verify_api_key"""
+    ใช้ hmac.compare_digest กัน timing attack เหมือน verify_otp/verify_api_key
+    (ไม่แตะ DB เลย จึงไม่จำเป็นต้องเป็น async)"""
     if not hmac.compare_digest(x_capture_secret, CAPTURE_EVENT_SECRET):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
