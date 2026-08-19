@@ -1,10 +1,11 @@
 import os
 import uuid
+import ipaddress
 import mimetypes
 import requests
 from datetime import datetime
 from functools import lru_cache
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from fastapi import HTTPException, status
 from security.ip_guard import resolve_and_check_ip, SSRFBlockedError
 from smartlpr.config import TEST_WEBHOOK_IMAGE_PATH
@@ -152,3 +153,56 @@ def is_url_host_safe(url: str) -> bool:
         return True
     except SSRFBlockedError:
         return False
+
+
+def build_pinned_request(url: str) -> tuple[str, dict]:
+    """
+    [DNS rebinding fix — HTTPS]: is_url_host_safe() ด้านบนเช็คแล้วว่า hostname resolve ไปยัง
+    IP ที่ปลอดภัย ณ ตอนเช็ค แต่ระหว่างช่วงที่เช็คเสร็จกับช่วงที่ client.post() ยิงจริง (คนละ
+    DNS lookup กันคนละครั้ง) เจ้าของโดเมนที่ตั้งใจร้ายสามารถสลับ DNS record ให้ชี้เข้า internal
+    IP ได้ทันภายในช่วงเวลานั้น (TTL=0 + authoritative DNS เป็นของตัวเอง) เป็นช่องโหว่ TOCTOU
+    แบบเดียวกับที่ resolve_rtsp_url_pinned() ใน camera_url_guard.py ปิดไปแล้วฝั่ง RTSP
+
+    ฝั่ง HTTPS ปิดด้วยวิธีเดียวกันตรงๆ ไม่ได้ (แทน hostname ด้วย IP ตรงๆ ใน URL) เพราะ:
+    - TLS cert ของปลายทางออกให้กับชื่อโดเมน ไม่ใช่ IP — ต่อด้วย IP ตรงๆ จะ validate cert ไม่ผ่าน
+    - ปลายทางที่ทำ virtual host (เซิร์ฟเวอร์เดียวรองรับหลายโดเมน) จะ route ผิดเว็บถ้า Host header
+      กลายเป็น IP แทนชื่อโดเมนเดิม
+
+    วิธีแก้: resolve+เช็ค IP ครั้งเดียว แล้ว "ต่อ connection" ไปที่ IP นั้นตรงๆ แต่ยังคง
+    Host header และ TLS SNI เป็น hostname เดิม — httpx.AsyncClient ยัง validate cert กับ
+    hostname เดิมได้ปกติผ่าน extension "sni_hostname" (รองรับตั้งแต่ httpx 0.21+) เพราะ hostname
+    ที่ resolve มาแล้วไม่มีการ resolve ซ้ำอีกรอบตอนต่อจริง ปิดช่อง race นี้ได้สมบูรณ์เหมือน RTSP
+
+    คืน (pinned_url, extra_kwargs) — caller ต้อง unpack extra_kwargs เข้า client.post(...)
+    เสมอ (เช่น client.post(pinned_url, **extra_kwargs, data=..., files=..., timeout=...))
+    ห้ามยิงแค่ pinned_url เฉยๆ โดยไม่ใส่ extra_kwargs เพราะจะกลายเป็นต่อด้วย IP ตรงๆ แบบ RTSP
+    ซึ่งฝั่ง HTTPS จะ cert validation fail / เข้าผิด virtual host ตามเหตุผลด้านบน
+
+    raise SSRFBlockedError เหมือน resolve_and_check_ip เดิมทุกประการ (ไม่พบ host ใน URL,
+    resolve ไม่ได้, หรือ IP เป็น private/loopback/link-local) — caller (worker.py) จับเองแล้ว
+    แปลงเป็น "ส่งไม่สำเร็จ" ธรรมดา ไม่ raise HTTPException เพราะไม่ได้อยู่ใน request context
+    """
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        raise SSRFBlockedError("ไม่พบ host ใน URL")
+
+    ip = resolve_and_check_ip(hostname)
+
+    ip_obj = ipaddress.ip_address(ip)
+    host_str = f"[{ip}]" if ip_obj.version == 6 else ip
+    netloc = host_str
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+
+    pinned_url = urlunparse(parsed._replace(netloc=netloc))
+
+    extra_kwargs = {
+        # Host header ต้องเป็น hostname เดิม ไม่งั้นปลายทางที่ทำ virtual host จะ route ผิดเว็บ
+        "headers": {"Host": hostname},
+        # sni_hostname บอก httpx ให้ทำ TLS handshake (SNI + cert hostname verification)
+        # เหมือนกำลังต่อ hostname เดิม ทั้งที่ connection จริงไปที่ IP ที่ pin ไว้แล้ว
+        "extensions": {"sni_hostname": hostname},
+    }
+
+    return pinned_url, extra_kwargs

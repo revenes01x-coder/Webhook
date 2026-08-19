@@ -10,19 +10,13 @@ from smartlpr import models
 from smartlpr.database import SessionLocal
 from services.email_service import send_webhook_endpoint_unhealthy_email
 from smartlpr.config import UNVERIFIED_USER_EXPIRE_HOURS, PLATE_DATA_RETENTION_DAYS
-from security.ssrf_guard import is_url_host_safe, build_test_webhook_payload
+from security.ssrf_guard import build_pinned_request, build_test_webhook_payload
 from security.camera_url_guard import resolve_rtsp_url_pinned
 from security.ip_guard import SSRFBlockedError
 
-# ตั้งค่าระยะเวลา Retry (ครั้งที่ 1=3 นาที, ครั้งที่ 2=5 นาที, ครั้งที่ 3=10 นาที)
 RETRY_DELAYS = {1: 3, 2: 5, 3: 10}
-
-# Circuit breaker: dead_letter ติดกันครบเท่านี้ -> ตัดไฟ endpoint (is_healthy=False)
-# ถ้ามี event ไหนสำเร็จคั่นกลาง นับ streak ใหม่ตั้งแต่ 0
 DEAD_LETTER_THRESHOLD = 3
 
-# Job A (realtime: event ใหม่ + retry ปกติ) และ Job B (resume จากสุสาน) ใช้ Semaphore
-# คนละตัวเด็ดขาด ไม่แย่ง concurrency กันเลย — event ใหม่ไม่ต้องรอ backlog ในสุสานเลย
 REALTIME_CONCURRENCY = 5
 RESUME_CONCURRENCY = 3
 
@@ -58,8 +52,8 @@ def _is_valid_ack(event: models.WebhookEvent, response: httpx.Response) -> bool:
 def _read_event_images(event: models.WebhookEvent) -> dict:
     """อ่านไฟล์รูป full/crop แบบ sync (blocking disk I/O) — เรียกผ่าน asyncio.to_thread เท่านั้น
     ไม่ให้ blocking I/O นี้ไปแช่ event loop ตอนมีหลาย event ยิงพร้อมกัน (REALTIME_CONCURRENCY=5 /
-    RESUME_CONCURRENCY=3 ผ่าน asyncio.gather) — หลักการเดียวกับที่ is_url_host_safe() ถูกห่อ
-    ด้วย asyncio.to_thread ใน _send_webhook_request() ด้านล่าง (SSRF check ก็เป็น blocking call
+    RESUME_CONCURRENCY=3 ผ่าน asyncio.gather) — หลักการเดียวกับที่ build_pinned_request() ถูกห่อ
+    ด้วย asyncio.to_thread ใน _send_webhook_request() ด้านล่าง (DNS resolve ก็เป็น blocking call
     เหมือนกัน) ไฟล์นี้ไม่มี ปล่อยให้ FileNotFoundError จาก open() ลอยออกไปให้ caller จับเอง
     (ดู except FileNotFoundError ใน _send_webhook_request)"""
     with open(event.full_image_path, "rb") as f_full, \
@@ -74,17 +68,20 @@ async def _send_webhook_request(client: httpx.AsyncClient, event: models.Webhook
     """ยิง 1 event จริงออกไป คืน (result_type, error_msg) เท่านั้น ไม่แตะ DB ในนี้เลย
     (กัน sync DB call ไปบล็อก event loop ตอนรันพร้อมกันหลาย coroutine ผ่าน asyncio.gather)"""
 
-    # [SSRF Guard]: เช็คซ้ำก่อนยิงจริงทุกครั้ง กัน DNS rebinding — โดเมนอาจถูกเปลี่ยน DNS record
-    # หลังผ่านการเช็คตอนสร้าง endpoint (verify_webhook_url) ไปแล้ว resolve DNS เป็น blocking call
-    # เลยรันใน thread แยกไม่ให้บล็อก event loop เช็คก่อนเปิดไฟล์ด้วย (fail fast ไม่เสีย I/O เปล่าๆ)
-    is_safe = await asyncio.to_thread(is_url_host_safe, event.target_url)
-    if not is_safe:
+    # [SSRF Guard]: resolve+เช็ค IP ปลอดภัยซ้ำก่อนยิงจริงทุกครั้ง แล้วต่อ connection ไปยัง IP
+    # ที่ resolve ได้ตรงๆ (ไม่ resolve ซ้ำอีกรอบตอน client.post() เหมือนโค้ดเดิม) ปิดช่อง DNS
+    # rebinding แบบ TOCTOU ได้สมบูรณ์ (โดเมนถูกเปลี่ยน DNS record ระหว่างช่วงเช็คกับช่วงยิงจริง)
+    # เหมือนที่ resolve_rtsp_url_pinned() ปิดให้ฝั่ง RTSP ไปแล้ว — ดู build_pinned_request()
+    # ใน ssrf_guard.py สำหรับรายละเอียดว่าทำไมฝั่ง HTTPS ต้องคง Host header/SNI เป็น hostname เดิม
+    try:
+        pinned_url, pin_kwargs = await asyncio.to_thread(build_pinned_request, event.target_url)
+    except SSRFBlockedError as e:
         logging.warning(
-            f"[SSRF Guard] ปฏิเสธการส่ง Event ID: {event.id} — target_url resolve ไปยัง "
-            f"IP ที่ไม่อนุญาตในขณะนี้ (อาจเป็น DNS rebinding)"
+            f"[SSRF Guard] ปฏิเสธการส่ง Event ID: {event.id} — {e} "
+            f"(อาจเป็น DNS rebinding)"
         )
         return "ssrf_blocked", (
-            "ปฏิเสธการส่ง: โดเมนปลายทาง resolve ไปยัง IP ที่ไม่อนุญาตในขณะนี้ "
+            f"ปฏิเสธการส่ง: {e} "
             "(อาจเกิดจาก DNS ถูกเปลี่ยนหลังผ่านการตรวจสอบตอนสร้าง endpoint ไปแล้ว)"
         )
 
@@ -95,10 +92,11 @@ async def _send_webhook_request(client: httpx.AsyncClient, event: models.Webhook
         files = await asyncio.to_thread(_read_event_images, event)
 
         response = await client.post(
-            event.target_url,
+            pinned_url,
             data=event.payload,
             files=files,
             timeout=10,
+            **pin_kwargs,
         )
 
         if response.status_code // 100 != 2:
@@ -297,20 +295,22 @@ async def process_webhook_queue():
 
 
 async def _ping_endpoint(client: httpx.AsyncClient, url: str) -> bool:
-    # [SSRF Guard]: เช็คซ้ำก่อนยิงจริงทุกครั้งเหมือน _send_webhook_request — endpoint ที่ถูกตัดไฟ
-    # อาจโดน DNS rebinding ระหว่างที่ตัดไฟอยู่ก็ได้ ไม่ควรถือว่า "ฟื้น" แค่เพราะ ping ผ่าน
-    is_safe = await asyncio.to_thread(is_url_host_safe, url)
-    if not is_safe:
-        logging.warning(
-            f"[SSRF Guard] ข้าม health check เพราะ host ของ {url} resolve ไปยัง IP ที่ไม่อนุญาตในขณะนี้"
-        )
+    # [SSRF Guard]: resolve+เช็ค IP ปลอดภัยซ้ำก่อนยิงจริงเหมือน _send_webhook_request แล้วต่อ
+    # connection ไปยัง IP ที่ resolve ได้ตรงๆ (ไม่ resolve ซ้ำตอน client.post()) — endpoint ที่
+    # ถูกตัดไฟอาจโดน DNS rebinding ระหว่างที่ตัดไฟอยู่ก็ได้ ไม่ควรถือว่า "ฟื้น" แค่เพราะ ping ผ่าน
+    # ด้วย hostname ที่อาจไม่ได้ต่อไปยัง IP เดียวกับที่เช็คจริง
+    try:
+        pinned_url, pin_kwargs = await asyncio.to_thread(build_pinned_request, url)
+    except SSRFBlockedError as e:
+        logging.warning(f"[SSRF Guard] ข้าม health check เพราะ {url} — {e}")
         return False
 
     try:
         test_event_id, dummy_payload, dummy_files = build_test_webhook_payload()
 
         response = await client.post(
-            url, data=dummy_payload, files=dummy_files, timeout=HEALTH_CHECK_TIMEOUT_SECONDS
+            pinned_url, data=dummy_payload, files=dummy_files, timeout=HEALTH_CHECK_TIMEOUT_SECONDS,
+            **pin_kwargs,
         )
         if response.status_code // 100 != 2:
             return False
@@ -634,7 +634,7 @@ def start_scheduler():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(process_webhook_queue, 'interval', seconds=30)
     scheduler.add_job(process_graveyard_resume, 'interval', minutes=30)
-    scheduler.add_job(verify_pending_cameras, 'interval', minutes=2)
+    scheduler.add_job(verify_pending_cameras, 'interval', minutes=1)
     scheduler.add_job(cleanup_unverified_users, 'interval', hours=1)
     scheduler.add_job(cleanup_old_plate_data, 'interval', hours=24)
     scheduler.add_job(cleanup_expired_revoked_tokens, 'interval', hours=1)
