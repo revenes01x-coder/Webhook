@@ -208,34 +208,6 @@ def verify_webhook_url(url: str):
 
     return True
 
-
-def is_url_host_safe(url: str) -> bool:
-    """
-    เช็คซ้ำแบบเบา (ไม่ยิง POST ทดสอบ ไม่บังคับ HTTPS ซ้ำ — เช็คตอนสร้างไปแล้วและ target_url
-    ที่เก็บใน DB การันตี https:// อยู่แล้ว) — resolve DNS ใหม่จาก hostname เดิมทุกครั้งที่เรียก
-    ใช้ก่อนยิงเว็บฮุคจริงทุกครั้งใน worker.py (_send_webhook_request, _ping_endpoint)
-
-    กัน DNS rebinding: โดเมนที่ผ่านการเช็คตอนสร้าง endpoint (verify_webhook_url) แล้ว แต่ภายหลัง
-    เจ้าของโดเมนเปลี่ยน DNS record ให้ชี้ไปยัง internal IP จะถูกจับได้ตรงนี้ก่อนยิงจริงทุกรอบ
-
-    คืน True/False เฉยๆ ไม่ raise เพราะ caller (worker.py) ไม่ได้อยู่ใน request context —
-    ต้องจัดการผลลัพธ์เป็น "ส่งไม่สำเร็จ" ธรรมดาแล้วปล่อยให้เข้า retry/circuit-breaker logic เดิม
-
-    หมายเหตุ: ฟังก์ชันนี้เช็คแล้ว "ทิ้งผล" เหมือนกัน (worker.py ยิงจริงด้วย client.post(url,...)
-    ที่ resolve ซ้ำเอง) จึงยังมีช่อง TOCTOU เดียวกันเหลืออยู่ฝั่งนี้ — ถ้าต้องการปิดให้ครบแบบ
-    เดียวกับ verify_webhook_url ด้านบน ต้องเปลี่ยน worker.py ไปใช้ build_pinned_request()
-    (แพทเทิร์นเดียวกับ resolve_rtsp_url_pinned) แทน is_url_host_safe() ตรงนี้ — นอก scope
-    ของการแก้ครั้งนี้ (เห็นแค่ verify_webhook_url ที่ยัง unpinned ตามที่ระบุมา) บอกได้ถ้าอยากแก้ต่อ
-    """
-    hostname = urlparse(url).hostname
-    if not hostname:
-        return False
-    try:
-        resolve_and_check_ip(hostname)
-        return True
-    except SSRFBlockedError:
-        return False
-
 def build_pinned_request(url: str) -> tuple[str, dict]:
     """
     [DNS rebinding fix — httpx]: เหมือน _build_pinned_https_request() ด้านบนแต่คืนรูปแบบ

@@ -268,9 +268,8 @@ def verify_otp_endpoint(payload: schemas.OtpVerifyRequest, db: Session = Depends
             detail=f"OTP ไม่ถูกต้อง (เหลือโอกาสกรอกอีก {max(remaining, 0)} ครั้ง)",
         )
 
-    # ถูกต้อง
-    otp_record.is_used = True
     user.is_verified = True
+    db.delete(otp_record)
     db.commit()
 
     return {"message": "ยืนยันตัวตนสำเร็จ สามารถเข้าสู่ระบบได้แล้ว"}
@@ -522,8 +521,7 @@ def verify_reset_otp(payload: schemas.VerifyResetOtpRequest, request: Request, d
             detail=f"OTP ไม่ถูกต้อง (เหลือโอกาสกรอกอีก {max(remaining, 0)} ครั้ง)",
         )
 
-    # ถูกต้อง — ปิด OTP นี้ทันที (ใช้ครั้งเดียว) แล้วออก reset token อายุสั้นแทน
-    otp_record.is_used = True
+    db.delete(otp_record)
     db.commit()
 
     reset_token = create_password_reset_token(user.email)

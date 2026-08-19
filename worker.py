@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from smartlpr import models
 from smartlpr.database import SessionLocal
 from services.email_service import send_webhook_endpoint_unhealthy_email
-from smartlpr.config import UNVERIFIED_USER_EXPIRE_HOURS, PLATE_DATA_RETENTION_DAYS
+from smartlpr.config import UNVERIFIED_USER_EXPIRE_HOURS, PLATE_DATA_RETENTION_DAYS, OTP_RETENTION_DAYS
 from security.ssrf_guard import build_pinned_request, build_test_webhook_payload
 from security.camera_url_guard import resolve_rtsp_url_pinned
 from security.ip_guard import SSRFBlockedError
@@ -627,6 +627,28 @@ async def cleanup_expired_refresh_tokens():
     finally:
         db.close()
 
+async def cleanup_old_otp_records():
+    """ลบ OtpVerification ที่ค้างเกิน OTP_RETENTION_DAYS นับจากวันหมดอายุ
+    (เคส happy path — verify สำเร็จ — ถูกลบทันทีที่ verify_otp_endpoint/verify_reset_otp
+    อยู่แล้ว ไม่ผ่าน job นี้ ดังนั้นแถวที่เหลือใน DB คือเคสที่ค้าง เช่น ขอ OTP แล้วไม่มา
+    verify ต่อ หรือกรอกผิดจนครบโควต้า (attempt_count >= OTP_MAX_ATTEMPTS))
+    ใช้ expires_at เป็นเกณฑ์ ไม่ใช้ is_used เพราะ record ที่ยังไม่หมดอายุ (user อาจกำลัง
+    กรอกอยู่จริงๆ) ไม่ควรถูกลบทั้งที่ is_used ยังเป็น False ปกติ"""
+    db: Session = SessionLocal()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=OTP_RETENTION_DAYS)
+        result = db.query(models.OtpVerification).filter(
+            models.OtpVerification.expires_at <= cutoff,
+        ).delete(synchronize_session=False)
+        db.commit()
+        if result:
+            logging.info(f"ลบ OTP record ที่หมดอายุไปแล้ว {result} รายการ")
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Cleanup OTP records ทำงานผิดพลาด: {e}")
+    finally:
+        db.close()
+
 async def resume_endpoint_now(endpoint_id: int) -> None:
     await process_graveyard_resume(endpoint_ids=[endpoint_id])
 
@@ -639,5 +661,6 @@ def start_scheduler():
     scheduler.add_job(cleanup_old_plate_data, 'interval', hours=24)
     scheduler.add_job(cleanup_expired_revoked_tokens, 'interval', hours=1)
     scheduler.add_job(cleanup_expired_refresh_tokens, 'interval', hours=1)
+    scheduler.add_job(cleanup_old_otp_records, 'interval', hours=24)
     scheduler.start()
     return scheduler
