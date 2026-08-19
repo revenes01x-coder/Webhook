@@ -51,14 +51,8 @@ LOGIN_INACTIVITY_RESET_MINUTES = 30
 REGISTER_LOCKOUT_LIMIT = 5
 REGISTER_LOCKOUT_MINUTES = 5
 
-FORGOT_PASSWORD_LOCKOUT_LIMIT = 5
-FORGOT_PASSWORD_LOCKOUT_MINUTES = 5
-
 RESET_PASSWORD_LOCKOUT_LIMIT = 5
 RESET_PASSWORD_LOCKOUT_MINUTES = 5
-
-RESEND_OTP_LOCKOUT_LIMIT = 3
-RESEND_OTP_LOCKOUT_MINUTES = 5
 
 
 def _issue_refresh_token(db: Session, user: models.User, family_id: str | None = None) -> str:
@@ -285,7 +279,8 @@ def resend_otp(payload: schemas.OtpResendRequest, db: Session = Depends(get_db))
 
     lockout_key = f"resend_otp_{payload.email}"
 
-    check_and_record(db, lockout_key, "resend_otp", limit=RESEND_OTP_LOCKOUT_LIMIT, window_minutes=RESEND_OTP_LOCKOUT_MINUTES)
+    check_and_record(db, lockout_key, "resend_otp",
+    limit=OTP_RESEND_LIMIT_PER_HOUR, window_minutes=60)
 
     latest_otp = (
         db.query(models.OtpVerification)
@@ -428,7 +423,8 @@ def forgot_password(payload: schemas.ForgotPasswordRequest, db: Session = Depend
 
     lockout_key = f"forgot_password_{payload.email}"
 
-    check_and_record(db, lockout_key, "forgot_password", limit=FORGOT_PASSWORD_LOCKOUT_LIMIT, window_minutes=FORGOT_PASSWORD_LOCKOUT_MINUTES)
+    check_and_record(db, lockout_key, "forgot_password",
+    limit=OTP_RESEND_LIMIT_PER_HOUR, window_minutes=60)
 
     latest_otp = (
         db.query(models.OtpVerification)
