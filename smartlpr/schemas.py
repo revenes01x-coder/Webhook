@@ -17,26 +17,17 @@ PASSWORD_INPUT_MAX_CHARS = 256
 
 
 def _validate_password_rules(v: str) -> str:
-    """กติการหัสผ่านกลาง ใช้ร่วมกันทั้งตอนสมัคร (UserCreate) และตั้งรหัสผ่านใหม่ (ResetPasswordRequest)
-
-    เปิดให้ใช้อักขระได้กว้างขึ้นกว่าเดิม (ไม่จำกัดแค่ a-z/A-Z/0-9 อีกต่อไป) ตามแนวทาง
-    NIST 800-63B ที่แนะนำให้เปิดกว้างเรื่องชนิดอักขระที่ผู้ใช้เลือกได้ แล้วคุมความปลอดภัย
-    ด้วยความยาวแทน เพราะการจำกัดชนิดอักขระแบบเดิมลด entropy ที่เลือกได้โดยไม่จำเป็น
-    (ยังคงบังคับต้องมีตัวอักษร + ตัวเลขอย่างน้อยอย่างละ 1 ตัว กันรหัสผ่านที่คาดเดาง่าย
-    เกินไป เช่นตัวเลขล้วนหรือคำธรรมดาล้วน)"""
     v = v.strip()
     errors = []
+
+    if not v.isascii():
+        errors.append("ห้ามใช้ภาษาไทยหรืออักขระอื่นที่ไม่ใช่ภาษาอังกฤษ (a-z, A-Z, 0-9 และสัญลักษณ์มาตรฐาน) เท่านั้น")
 
     if len(v) < PASSWORD_MIN_LENGTH:
         errors.append(f"ต้องมีความยาวอย่างน้อย {PASSWORD_MIN_LENGTH} ตัวอักษร")
 
-    byte_length = len(v.encode("utf-8"))
-    if byte_length > PASSWORD_MAX_BYTES:
-        errors.append(
-            f"ยาวเกินไป: ระบบรองรับรหัสผ่านสูงสุด {PASSWORD_MAX_BYTES} ไบต์ "
-            f"(รหัสผ่านที่กรอกยาว {byte_length} ไบต์ — ถ้ามีอักขระภาษาไทยหรือสัญลักษณ์พิเศษ "
-            "บางตัวอาจกินมากกว่า 1 ไบต์ต่อตัวอักษร ทำให้ยาวเกินได้ทั้งที่นับตัวอักษรดูไม่เยอะ)"
-        )
+    if len(v) > PASSWORD_MAX_BYTES:
+        errors.append(f"ยาวเกินไป: ระบบรองรับรหัสผ่านสูงสุด {PASSWORD_MAX_BYTES} ตัวอักษร")
 
     if not any(ch.isalpha() for ch in v):
         errors.append("ต้องมีตัวอักษรอย่างน้อย 1 ตัว")
@@ -47,7 +38,6 @@ def _validate_password_rules(v: str) -> str:
         raise ValueError("รหัสผ่านไม่ถูกต้อง: " + ", ".join(errors))
 
     return v
-
 
 # ---- สำหรับการสมัครสมาชิกและเข้าสู่ระบบ ----
 class UserCreate(BaseModel):
