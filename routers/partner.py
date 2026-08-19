@@ -1,5 +1,7 @@
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
 from smartlpr import models
@@ -12,33 +14,38 @@ from services.rate_limiter import check_rate_limit
 router = APIRouter(prefix="/partner", tags=["Partner Integration"])
 
 @router.post("/cameras", response_model=schemas.MyCameraResponse)
-def add_camera_from_partner(
+async def add_camera_from_partner(
     payload: schemas.PartnerCameraCreate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(require_api_key),
 ):
-  
-    # [Rate Limit]: เพิ่มกล้องได้ 5 ตัว / ชั่วโมง / user (กันสแปม/API key หลุดแล้วโดนยิงรัว)
-    check_rate_limit(db, f"partner_add_camera_{current_user.id}", "partner_add_camera", limit=5, window_minutes=60)
 
-    existing_id = db.query(models.Camera).filter(models.Camera.id == payload.camera_id).first()
+    # [Rate Limit]: เพิ่มกล้องได้ 5 ตัว / ชั่วโมง / user (กันสแปม/API key หลุดแล้วโดนยิงรัว)
+    await check_rate_limit(db, f"partner_add_camera_{current_user.id}", "partner_add_camera", limit=5, window_minutes=60)
+
+    existing_id_result = await db.execute(select(models.Camera).filter(models.Camera.id == payload.camera_id))
+    existing_id = existing_id_result.scalar_one_or_none()
     if existing_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"camera_id '{payload.camera_id}' ถูกใช้ไปแล้ว กรุณาตั้งชื่ออื่น",
         )
 
-    existing_url = db.query(models.Camera).filter(models.Camera.rtsp_url == payload.camera_url).first()
+    existing_url_result = await db.execute(select(models.Camera).filter(models.Camera.rtsp_url == payload.camera_url))
+    existing_url = existing_url_result.scalar_one_or_none()
     if existing_url:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="ลิงก์กล้องไม่ถูกต้อง: ลิงก์นี้ถูกเพิ่มเข้าระบบไปแล้ว",
         )
 
-    webhook = db.query(models.WebhookEndpoint).filter(
-        models.WebhookEndpoint.url == payload.webhook_url,
-        models.WebhookEndpoint.user_id == current_user.id,
-    ).first()
+    webhook_result = await db.execute(
+        select(models.WebhookEndpoint).filter(
+            models.WebhookEndpoint.url == payload.webhook_url,
+            models.WebhookEndpoint.user_id == current_user.id,
+        )
+    )
+    webhook = webhook_result.scalar_one_or_none()
     if not webhook:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -48,7 +55,7 @@ def add_camera_from_partner(
             ),
         )
 
-    verify_camera_rtsp_url(payload.camera_url)
+    await asyncio.to_thread(verify_camera_rtsp_url, payload.camera_url)
 
     new_camera = models.Camera(
         id=payload.camera_id,
@@ -61,11 +68,12 @@ def add_camera_from_partner(
     db.add(new_camera)
 
     try:
-        db.commit()
+        await db.commit()
     except IntegrityError:
-        db.rollback()
-        
-        if db.query(models.Camera).filter(models.Camera.id == payload.camera_id).first():
+        await db.rollback()
+
+        recheck_result = await db.execute(select(models.Camera).filter(models.Camera.id == payload.camera_id))
+        if recheck_result.scalar_one_or_none():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"camera_id '{payload.camera_id}' ถูกใช้ไปแล้ว กรุณาตั้งชื่ออื่น",
@@ -75,7 +83,7 @@ def add_camera_from_partner(
             detail="ลิงก์กล้องไม่ถูกต้อง: ลิงก์นี้ถูกเพิ่มเข้าระบบไปแล้ว",
         )
 
-    db.refresh(new_camera)
+    await db.refresh(new_camera)
 
     return schemas.MyCameraResponse(
         camera_id=new_camera.id,
@@ -88,16 +96,19 @@ def add_camera_from_partner(
 
 
 @router.post("/cameras/status")
-def update_camera_status_from_partner(
+async def update_camera_status_from_partner(
     payload: schemas.PartnerCameraStatusUpdate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(require_api_key),
 ):
 
-    camera = db.query(models.Camera).filter(
-        models.Camera.id == payload.camera_id,
-        models.Camera.owner_user_id == current_user.id,
-    ).first()
+    result = await db.execute(
+        select(models.Camera).filter(
+            models.Camera.id == payload.camera_id,
+            models.Camera.owner_user_id == current_user.id,
+        )
+    )
+    camera = result.scalar_one_or_none()
     if not camera:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -114,23 +125,26 @@ def update_camera_status_from_partner(
         )
 
     camera.is_active = payload.is_active
-    db.commit()
+    await db.commit()
 
     status_text = "เปิด" if payload.is_active else "ปิด"
     return {"message": f"{status_text}ใช้งานกล้อง '{camera.id}' เรียบร้อยแล้ว"}
 
 @router.get("/cameras/{camera_id}", response_model=schemas.PartnerCameraStatusResponse)
-def get_camera_verification_status(
+async def get_camera_verification_status(
     camera_id: str,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(require_api_key),
 ):
-    check_rate_limit(db, f"camera_status_check_{current_user.id}", "camera_status_check", limit=60, window_minutes=60)
+    await check_rate_limit(db, f"camera_status_check_{current_user.id}", "camera_status_check", limit=60, window_minutes=60)
 
-    camera = db.query(models.Camera).filter(
-        models.Camera.id == camera_id,
-        models.Camera.owner_user_id == current_user.id,
-    ).first()
+    result = await db.execute(
+        select(models.Camera).filter(
+            models.Camera.id == camera_id,
+            models.Camera.owner_user_id == current_user.id,
+        )
+    )
+    camera = result.scalar_one_or_none()
     if not camera:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

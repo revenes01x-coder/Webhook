@@ -1,6 +1,8 @@
+import asyncio
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
-from sqlalchemy.orm import Session
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timezone
 from typing import List, Optional
 from worker import resume_endpoint_now
@@ -24,14 +26,14 @@ _VALID_STATUSES = {"pending", "approved", "rejected"}
 _DEFAULT_REJECT_NOTE = "คำขอของคุณไม่ได้รับการอนุมัติในขณะนี้"
 
 @router.get("/access-requests", response_model=schemas.PaginatedResponse[schemas.AccessRequestResponse])
-def list_access_requests(
+async def list_access_requests(
     status_filter: Optional[str] = Query(
         default="pending",
         alias="status",
         description="กรองตามสถานะ: pending / approved / rejected (ไม่ใส่ = ดูทั้งหมด)",
     ),
     page_params: PageParams = Depends(),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
     if status_filter and status_filter not in _VALID_STATUSES:
@@ -40,32 +42,34 @@ def list_access_requests(
             detail=f"status ต้องเป็นหนึ่งใน {sorted(_VALID_STATUSES)}",
         )
 
-    query = db.query(models.AccessRequest)
+    query = select(models.AccessRequest)
     if status_filter:
         query = query.filter(models.AccessRequest.status == status_filter)
     query = query.order_by(models.AccessRequest.id.desc())
 
-    return paginate(query, page_params)
+    return await paginate(db, query, page_params)
 
 @router.get("/access-requests/{request_id}", response_model=schemas.AccessRequestResponse)
-def get_access_request_detail(
+async def get_access_request_detail(
     request_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    req = db.query(models.AccessRequest).filter(models.AccessRequest.id == request_id).first()
+    result = await db.execute(select(models.AccessRequest).filter(models.AccessRequest.id == request_id))
+    req = result.scalar_one_or_none()
     if not req:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ไม่พบคำขอนี้")
     return req
 
 @router.patch("/access-requests/{request_id}", response_model=schemas.AccessRequestResponse)
-def review_access_request(
+async def review_access_request(
     request_id: int,
     payload: schemas.ReviewDecision,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    req = db.query(models.AccessRequest).filter(models.AccessRequest.id == request_id).first()
+    result = await db.execute(select(models.AccessRequest).filter(models.AccessRequest.id == request_id))
+    req = result.scalar_one_or_none()
     if not req:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ไม่พบคำขอนี้")
     if req.status != "pending":
@@ -83,17 +87,18 @@ def review_access_request(
         req.status = "rejected"
         req.admin_note = payload.admin_note  # ไม่บังคับ อาจเป็น None
 
-    db.commit()
-    db.refresh(req)
+    await db.commit()
+    await db.refresh(req)
 
-    owner = db.query(models.User).filter(models.User.id == req.user_id).first()
+    owner_result = await db.execute(select(models.User).filter(models.User.id == req.user_id))
+    owner = owner_result.scalar_one_or_none()
 
     if owner:
         try:
             if req.status == "approved":
-                send_access_approved_email(owner.email)
+                await asyncio.to_thread(send_access_approved_email, owner.email)
             else:
-                send_access_rejected_email(owner.email, req.admin_note or _DEFAULT_REJECT_NOTE)
+                await asyncio.to_thread(send_access_rejected_email, owner.email, req.admin_note or _DEFAULT_REJECT_NOTE)
         except RuntimeError as e:
             logging.error(f"ส่งอีเมลแจ้งผล access request id={req.id} ไม่สำเร็จ: {e}")
     else:
@@ -107,22 +112,25 @@ def review_access_request(
     return req
 
 @router.get("/cameras", response_model=schemas.PaginatedResponse[schemas.CameraAdminResponse])
-def list_cameras(
+async def list_cameras(
     page_params: PageParams = Depends(),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
     """ดูกล้องทั้งหมดในระบบ ไม่ว่าใครเป็นเจ้าของ พร้อมสถานะ webhook ปลายทางที่ผูกไว้
     (webhook_is_active) ให้เห็นได้เลยว่ากล้องไหน is_active=True แต่จริงๆ ไม่ได้รันอยู่เพราะ
     webhook ถูกปิด"""
     base_query = (
-        db.query(models.Camera, models.WebhookEndpoint.is_active)
+        select(models.Camera, models.WebhookEndpoint.is_active)
         .join(models.WebhookEndpoint, models.Camera.webhook_endpoint_id == models.WebhookEndpoint.id)
         .order_by(models.Camera.id.desc())
     )
 
-    total = base_query.count()
-    rows = base_query.offset(page_params.offset).limit(page_params.page_size).all()
+    count_query = select(func.count()).select_from(base_query.order_by(None).subquery())
+    total = (await db.execute(count_query)).scalar_one()
+
+    rows_result = await db.execute(base_query.offset(page_params.offset).limit(page_params.page_size))
+    rows = rows_result.all()
     total_pages = (total + page_params.page_size - 1) // page_params.page_size if total else 0
 
     return {
@@ -145,45 +153,46 @@ def list_cameras(
     }
 
 @router.get("/users", response_model=schemas.PaginatedResponse[schemas.UserAdminResponse])
-def list_users(
+async def list_users(
     page_params: PageParams = Depends(),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
     """ดูรายชื่อ user ทั้งหมดในระบบแบบแบ่งหน้า ใช้กับแท็บ Admin > ผู้ใช้งาน (ตาราง overview)
     รายละเอียดเจาะลึกรายคน (webhook_count/camera_count/suspended_reason) ยังคงต้องเรียก
     GET /admin/users/{user_id} แยกต่างหาก (endpoint เดิม ไม่เปลี่ยน)"""
-    query = db.query(models.User).order_by(models.User.id.desc())
-    return paginate(query, page_params)
+    query = select(models.User).order_by(models.User.id.desc())
+    return await paginate(db, query, page_params)
 
 
 @router.get("/users/{user_id}", response_model=schemas.UserAdminDetailResponse)
-def get_user_detail(
+async def get_user_detail(
     user_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
     """ดูรายละเอียด user คนเดียว พร้อมจำนวน webhook/camera ที่มี และประวัติคำขอใช้งานระบบ
     (access_requests) ทั้งหมดที่เคยส่ง เรียงจากล่าสุดไปเก่าสุด — ใช้โชว์ข้อมูลที่ user กรอกตอน
     สมัครขอใช้งาน (องค์กร/ผู้ติดต่อ/วัตถุประสงค์) ในโมดัล "รายละเอียดผู้ใช้" ฝั่ง admin"""
-    user = db.query(models.User).filter(models.User.id == user_id).first()
+    result = await db.execute(select(models.User).filter(models.User.id == user_id))
+    user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ไม่พบผู้ใช้นี้")
 
-    webhook_count = db.query(models.WebhookEndpoint).filter(
-        models.WebhookEndpoint.user_id == user.id
-    ).count()
-    camera_count = db.query(models.Camera).filter(
-        models.Camera.owner_user_id == user.id
-    ).count()
+    webhook_count = (await db.execute(
+        select(func.count(models.WebhookEndpoint.id)).filter(models.WebhookEndpoint.user_id == user.id)
+    )).scalar_one()
+    camera_count = (await db.execute(
+        select(func.count(models.Camera.id)).filter(models.Camera.owner_user_id == user.id)
+    )).scalar_one()
 
     # เพิ่ม: ดึงคำขอใช้งานทั้งหมดของ user คนนี้ (อาจมีหลายใบถ้าเคยถูกปฏิเสธแล้วส่งใหม่)
-    access_requests = (
-        db.query(models.AccessRequest)
+    access_requests_result = await db.execute(
+        select(models.AccessRequest)
         .filter(models.AccessRequest.user_id == user.id)
         .order_by(models.AccessRequest.id.desc())
-        .all()
     )
+    access_requests = access_requests_result.scalars().all()
 
     return schemas.UserAdminDetailResponse(
         id=user.id,
@@ -200,10 +209,10 @@ def get_user_detail(
     )
 
 @router.patch("/users/{user_id}/suspend", response_model=schemas.UserAdminResponse)
-def set_user_suspend_status(
+async def set_user_suspend_status(
     user_id: int,
     payload: schemas.UserSuspendUpdate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
     """ระงับ/ปลดระงับ user — ห้ามแตะบัญชีของตัวเอง (กัน admin ล็อกตัวเองไม่ได้ตั้งใจ)"""
@@ -213,20 +222,21 @@ def set_user_suspend_status(
             detail="ไม่สามารถระงับ/ปลดระงับบัญชีของตัวเองได้",
         )
 
-    user = db.query(models.User).filter(models.User.id == user_id).first()
+    result = await db.execute(select(models.User).filter(models.User.id == user_id))
+    user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ไม่พบผู้ใช้นี้")
 
     user.is_suspended = payload.is_suspended
     user.suspended_reason = payload.admin_note if payload.is_suspended else None
-    db.commit()
-    db.refresh(user)
+    await db.commit()
+    await db.refresh(user)
 
     try:
         if user.is_suspended:
-            send_account_suspended_email(user.email, user.suspended_reason)
+            await asyncio.to_thread(send_account_suspended_email, user.email, user.suspended_reason)
         else:
-            send_account_unsuspended_email(user.email)
+            await asyncio.to_thread(send_account_unsuspended_email, user.email)
     except RuntimeError as e:
         action = "ระงับ" if user.is_suspended else "ปลดระงับ"
         logging.error(f"ส่งอีเมลแจ้ง{action}บัญชี user_id={user.id} ไม่สำเร็จ: {e}")
@@ -235,29 +245,30 @@ def set_user_suspend_status(
 
 
 @router.get("/webhooks", response_model=schemas.PaginatedResponse[schemas.WebhookAdminResponse])
-def list_webhooks(
+async def list_webhooks(
     user_id: Optional[int] = Query(default=None, description="กรองเฉพาะ webhook ของ user คนนี้"),
     page_params: PageParams = Depends(),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
     """ดู webhook endpoint ทั้งหมดในระบบ ไม่ว่าใครเป็นเจ้าของ"""
-    query = db.query(models.WebhookEndpoint)
+    query = select(models.WebhookEndpoint)
     if user_id is not None:
         query = query.filter(models.WebhookEndpoint.user_id == user_id)
     query = query.order_by(models.WebhookEndpoint.id.desc())
-    return paginate(query, page_params)
+    return await paginate(db, query, page_params)
 
 
 @router.patch("/webhooks/{webhook_id}/status", response_model=schemas.WebhookAdminResponse)
-def set_webhook_status(
+async def set_webhook_status(
     webhook_id: int,
     payload: schemas.WebhookStatusUpdate,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    endpoint = db.query(models.WebhookEndpoint).filter(models.WebhookEndpoint.id == webhook_id).first()
+    result = await db.execute(select(models.WebhookEndpoint).filter(models.WebhookEndpoint.id == webhook_id))
+    endpoint = result.scalar_one_or_none()
     if not endpoint:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ไม่พบ webhook endpoint นี้")
 
@@ -268,16 +279,17 @@ def set_webhook_status(
     # แตะในฟังก์ชันนี้เลย อ่านตอนไหนก็ค่าเดิม แค่เขียนให้ชัดเจนว่าอ่านจากตอนไหน)
     was_unhealthy = not endpoint.is_healthy
 
-    db.commit()
-    db.refresh(endpoint)
+    await db.commit()
+    await db.refresh(endpoint)
 
-    owner = db.query(models.User).filter(models.User.id == endpoint.user_id).first()
+    owner_result = await db.execute(select(models.User).filter(models.User.id == endpoint.user_id))
+    owner = owner_result.scalar_one_or_none()
     if owner:
         try:
             if endpoint.is_active:
-                send_webhook_enabled_email(owner.email, endpoint.url)
+                await asyncio.to_thread(send_webhook_enabled_email, owner.email, endpoint.url)
             else:
-                send_webhook_disabled_email(owner.email, endpoint.url, endpoint.disabled_reason)
+                await asyncio.to_thread(send_webhook_disabled_email, owner.email, endpoint.url, endpoint.disabled_reason)
         except RuntimeError as e:
             action = "เปิด" if endpoint.is_active else "ปิด"
             logging.error(f"ส่งอีเมลแจ้ง{action}ใช้งาน webhook id={endpoint.id} ไม่สำเร็จ: {e}")

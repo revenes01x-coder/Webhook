@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from smartlpr import models
 import smartlpr.schemas as schemas
@@ -16,11 +16,11 @@ REGEN_API_KEY_LOCKOUT_MINUTES = 5
 
 
 @router.post("/regenerate", response_model=schemas.ApiKeyResponse)
-def regenerate_api_key(
-    db: Session = Depends(get_db),
+async def regenerate_api_key(
+    db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(require_access_approved),
 ):
-    check_and_record(
+    await check_and_record(
         db,
         f"regen_api_key_{current_user.id}",
         "regen_api_key",
@@ -30,7 +30,7 @@ def regenerate_api_key(
 
     plain_key = generate_api_key()
     current_user.api_key_hash = hash_api_key(plain_key)
-    db.commit()
+    await db.commit()
 
     return schemas.ApiKeyResponse(api_key=plain_key)
 

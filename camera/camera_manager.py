@@ -4,7 +4,12 @@ import multiprocessing as mp
 
 from smartlpr import models
 import camera.camera_worker as camera_worker
-from smartlpr.database import SessionLocal
+# [แก้ไข] เดิม import จาก smartlpr.database ซึ่งตอนนี้เป็น async engine/session แล้ว
+# (ใช้ได้เฉพาะในโค้ดที่รันอยู่ใน FastAPI event loop) แต่ camera_manager.py รันเป็น
+# process แยกต่างหากของตัวเอง (multiprocessing entry point) ไม่ได้อยู่ใน event loop ของ
+# uvicorn เลย ถ้ายังใช้ SessionLocal ตัวเดิม db.query()/db.close() ด้านล่างจะพังทันที
+# เพราะ AsyncSession ไม่มี .query() ให้เรียก — เปลี่ยนไปใช้ sync session ของตัวเองแทน
+from smartlpr.database_sync import SessionLocal
 
 POLL_INTERVAL_SECONDS = 30
 TERMINATE_TIMEOUT_SECONDS = 10

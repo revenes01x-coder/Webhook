@@ -3,7 +3,8 @@ from fastapi import FastAPI, Depends, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timezone
 from smartlpr import models
@@ -14,14 +15,19 @@ import os
 from smartlpr.config import CAPTURES_SAVE_DIR
 from smartlpr.security import require_capture_event_secret
 
-models.Base.metadata.create_all(bind=engine)
-
 logger = logging.getLogger("smartlpr")
 
-# Lifespan: สั่งให้ Worker ทำงานตอนเปิดเซิร์ฟเวอร์ และปิด Worker ตอนปิดเซิร์ฟเวอร์
+
+async def _init_models() -> None:
+    async with engine.begin() as conn:
+        await conn.run_sync(models.Base.metadata.create_all)
+
+
+# Lifespan: สร้างตาราง (ถ้ายังไม่มี) + สั่งให้ Worker ทำงานตอนเปิดเซิร์ฟเวอร์ และปิด Worker ตอนปิดเซิร์ฟเวอร์
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print(" เริ่มระบบ SmartLPR Webhook API และ Background Worker...")
+    await _init_models()
     scheduler = start_scheduler()
     yield
     print(" กำลังปิดระบบและหยุดการทำงานของ Worker...")
@@ -74,7 +80,7 @@ def _is_valid_capture_path(path: str, camera_id: str, kind: str) -> bool:
 
 
 @app.post("/capture-event", tags=["Internal System"])
-def receive_from_rtsp(
+async def receive_from_rtsp(
     camera_id: str = Form(...),
     event_id: str = Form(...),
     plate: str = Form(...),
@@ -83,12 +89,13 @@ def receive_from_rtsp(
     timestamp: str = Form(...),
     full_image_path: str = Form(...),
     crop_image_path: str = Form(...),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     _: None = Depends(require_capture_event_secret),
 ):
 
     # 1. เช็คว่า camera_id นี้มีจริงและ is_active=True ไหม ถ้าไม่ผ่าน -> ignore
-    camera = db.query(models.Camera).filter(models.Camera.id == camera_id).first()
+    camera_result = await db.execute(select(models.Camera).filter(models.Camera.id == camera_id))
+    camera = camera_result.scalar_one_or_none()
     if not camera or not camera.is_active:
         return {"status": "ignored", "message": "ไม่พบกล้องนี้ในระบบ หรือกล้องถูกปิดใช้งานอยู่"}
 
@@ -100,7 +107,8 @@ def receive_from_rtsp(
     owner_user_id = camera.owner_user_id
 
     # 2.5 [Suspend Guard]: เจ้าของกล้องถูกระงับอยู่ -> ไม่สร้าง WebhookEvent ใหม่เข้าคิวเลย
-    owner = db.query(models.User).filter(models.User.id == owner_user_id).first()
+    owner_result = await db.execute(select(models.User).filter(models.User.id == owner_user_id))
+    owner = owner_result.scalar_one_or_none()
     if not owner or owner.is_suspended:
         return {"status": "ignored", "message": "บัญชีเจ้าของกล้องนี้ถูกระงับการใช้งานอยู่ ไม่ส่งข้อมูลต่อ"}
 
@@ -115,12 +123,15 @@ def receive_from_rtsp(
         "capture_time": timestamp,
     }
 
-    # 4. หา WebhookEndpoint ที่กล้องตัวนี้ผูกไว้ 
-    #    WebhookEvent ลงคิว 1 event ต่อ 1 กล้อง/1 การตรวจจับเท่านั้น 
-    endpoint = db.query(models.WebhookEndpoint).filter(
-        models.WebhookEndpoint.id == camera.webhook_endpoint_id,
-        models.WebhookEndpoint.is_active == True
-    ).first()
+    # 4. หา WebhookEndpoint ที่กล้องตัวนี้ผูกไว้
+    #    WebhookEvent ลงคิว 1 event ต่อ 1 กล้อง/1 การตรวจจับเท่านั้น
+    endpoint_result = await db.execute(
+        select(models.WebhookEndpoint).filter(
+            models.WebhookEndpoint.id == camera.webhook_endpoint_id,
+            models.WebhookEndpoint.is_active == True,  # noqa: E712
+        )
+    )
+    endpoint = endpoint_result.scalar_one_or_none()
 
     if not endpoint:
         return {"status": "ignored", "message": "Webhook ที่กล้องนี้ผูกไว้ถูกปิดใช้งานอยู่"}
@@ -142,10 +153,10 @@ def receive_from_rtsp(
     db.add(new_event)
 
     try:
-        db.commit()
+        await db.commit()
     except IntegrityError:
         # กันกรณีกล้องยิง event_id ซ้ำ (เช่น retry เอง) ไม่ให้ 500
-        db.rollback()
+        await db.rollback()
         return {"status": "ignored", "message": "event_id นี้เคยถูกบันทึกไปแล้ว"}
 
     return {"status": "success", "message": "เพิ่มข้อมูลลงคิวเรียบร้อย Worker จะจัดการส่งต่อให้ทันที"}

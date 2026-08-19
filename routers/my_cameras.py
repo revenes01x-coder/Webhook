@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from smartlpr import models
 import smartlpr.schemas as schemas
@@ -10,25 +11,28 @@ from smartlpr.pagination import PageParams
 router = APIRouter(prefix="/my", tags=["My Cameras"])
 
 @router.get("/cameras", response_model=schemas.PaginatedResponse[schemas.MyCameraResponse])
-def list_my_cameras(
+async def list_my_cameras(
     page_params: PageParams = Depends(),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
     base_query = (
-        db.query(models.Camera, models.WebhookEndpoint.url, models.WebhookEndpoint.is_active)
+        select(models.Camera, models.WebhookEndpoint.url, models.WebhookEndpoint.is_active)
         .join(models.WebhookEndpoint, models.Camera.webhook_endpoint_id == models.WebhookEndpoint.id)
         .filter(models.Camera.owner_user_id == current_user.id)
     )
 
-    total = base_query.count()
-    rows = (
+    count_query = select(func.count()).select_from(base_query.order_by(None).subquery())
+    total = (await db.execute(count_query)).scalar_one()
+
+    rows_result = await db.execute(
         base_query
         .order_by(models.Camera.id.desc())
         .offset(page_params.offset)
         .limit(page_params.page_size)
-        .all()
     )
+    rows = rows_result.all()
+
     total_pages = (total + page_params.page_size - 1) // page_params.page_size if total else 0
 
     return {

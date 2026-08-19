@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 from smartlpr import models
 import smartlpr.schemas as schemas
@@ -12,25 +13,28 @@ from smartlpr.pagination import PageParams, paginate
 router = APIRouter(prefix="/webhook", tags=["Webhook Management"])
 
 @router.post("/add", response_model=schemas.WebhookResponse)
-def add_webhook(
+async def add_webhook(
     webhook: schemas.WebhookCreate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(require_access_approved),
 ):
 
-    check_rate_limit(db, f"add_webhook_{current_user.id}", "add_webhook", limit=20, window_minutes=60)
+    # [แก้ไข] check_rate_limit เป็น async def แล้ว เดิมเรียกไม่มี await ทำให้ rate limit จุดนี้ไม่ทำงานจริง
+    await check_rate_limit(db, f"add_webhook_{current_user.id}", "add_webhook", limit=20, window_minutes=60)
 
     url_str = str(webhook.url)
 
-    existing = db.query(models.WebhookEndpoint).filter(models.WebhookEndpoint.url == url_str).first()
+    existing_result = await db.execute(
+        select(models.WebhookEndpoint).filter(models.WebhookEndpoint.url == url_str)
+    )
+    existing = existing_result.scalar_one_or_none()
     if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="URL นี้ถูกใช้เป็น webhook ในระบบไปแล้ว กรุณาตรวจสอบรายการ webhook ของคุณ (GET /webhook/my) หรือใช้ URL อื่น",
         )
 
-    # ส่ง URL เข้าด่านอรหันต์ SSRF Guard
-    verify_webhook_url(url_str)
+    await verify_webhook_url(url_str)
 
     new_endpoint = models.WebhookEndpoint(
         user_id=current_user.id,
@@ -40,23 +44,23 @@ def add_webhook(
     db.add(new_endpoint)
 
     try:
-        db.commit()
+        await db.commit()
     except IntegrityError:
-        db.rollback()
+        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="URL นี้ถูกใช้เป็น webhook ในระบบไปแล้ว กรุณาตรวจสอบรายการ webhook ของคุณ (GET /webhook/my) หรือใช้ URL อื่น",
         )
 
-    db.refresh(new_endpoint)
+    await db.refresh(new_endpoint)
 
     return new_endpoint
 
 
 @router.get("/my", response_model=schemas.PaginatedResponse[schemas.WebhookResponse])
-def list_my_webhooks(
+async def list_my_webhooks(
     page_params: PageParams = Depends(),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     # แค่ดูข้อมูล ไม่มีสิทธิ์สร้าง/แก้ -> ใช้ get_current_user เฉยๆ พอ ตาม dependency rule ข้อ 7
     current_user: models.User = Depends(get_current_user),
 ):
@@ -66,8 +70,8 @@ def list_my_webhooks(
     กำลังมีปัญหา/ถูกตัดไฟอยู่บ้าง
     """
     query = (
-        db.query(models.WebhookEndpoint)
+        select(models.WebhookEndpoint)
         .filter(models.WebhookEndpoint.user_id == current_user.id)
         .order_by(models.WebhookEndpoint.id.desc())
     )
-    return paginate(query, page_params)
+    return await paginate(db, query, page_params)

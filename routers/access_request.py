@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from smartlpr import models
 import smartlpr.schemas as schemas
@@ -11,34 +12,32 @@ router = APIRouter(prefix="/access-request", tags=["Access Request"])
 
 
 @router.post("/submit", response_model=schemas.AccessRequestResponse)
-def submit_access_request(
+async def submit_access_request(
     payload: schemas.AccessRequestCreate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     # ต้องผ่าน require_terms_accepted ก่อนเสมอ (login -> terms -> access-request)
     current_user: models.User = Depends(require_terms_accepted),
 ):
-    already_approved = (
-        db.query(models.AccessRequest)
-        .filter(
+    already_approved_result = await db.execute(
+        select(models.AccessRequest).filter(
             models.AccessRequest.user_id == current_user.id,
             models.AccessRequest.status == "approved",
         )
-        .first()
     )
+    already_approved = already_approved_result.scalar_one_or_none()
     if already_approved:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="คุณได้รับอนุมัติให้ใช้งานระบบนี้ไปแล้ว ไม่จำเป็นต้องส่งคำขอใหม่",
         )
 
-    existing_pending = (
-        db.query(models.AccessRequest)
-        .filter(
+    existing_pending_result = await db.execute(
+        select(models.AccessRequest).filter(
             models.AccessRequest.user_id == current_user.id,
             models.AccessRequest.status == "pending",
         )
-        .first()
     )
+    existing_pending = existing_pending_result.scalar_one_or_none()
     if existing_pending:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -55,19 +54,20 @@ def submit_access_request(
         status="pending",
     )
     db.add(new_request)
-    db.commit()
-    db.refresh(new_request)
+    await db.commit()
+    await db.refresh(new_request)
     return new_request
 
 @router.get("/my-status", response_model=schemas.PaginatedResponse[schemas.AccessRequestResponse])
-def my_access_requests(
+async def my_access_requests(
     page_params: PageParams = Depends(),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
     query = (
-        db.query(models.AccessRequest)
+        select(models.AccessRequest)
         .filter(models.AccessRequest.user_id == current_user.id)
         .order_by(models.AccessRequest.id.desc())
     )
-    return paginate(query, page_params)
+
+    return await paginate(db, query, page_params)

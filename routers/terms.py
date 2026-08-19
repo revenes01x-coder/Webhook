@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from smartlpr import models
 from smartlpr.database import get_db
@@ -54,14 +54,14 @@ def get_latest_terms():
 
 
 @router.post("/accept")
-def accept_terms(
-    db: Session = Depends(get_db),
+async def accept_terms(
+    db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
     if current_user.terms_accepted:
         return {"message": "คุณยอมรับข้อตกลงการใช้งานไปแล้ว"}
 
     current_user.terms_accepted = True
-    db.commit()
+    await db.commit()
 
     return {"message": "ยอมรับข้อตกลงการใช้งานเรียบร้อยแล้ว"}
