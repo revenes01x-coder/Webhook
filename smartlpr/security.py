@@ -141,22 +141,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
         raise credentials_exception
     return user
 
-
-# ---------------------------------------------------------------------------
-# Dependency chain ตามลำดับที่ตกลงกันไว้:
-#   login (is_verified) -> require_terms_accepted -> require_access_approved
-#
-# หมายเหตุ: is_suspended ไม่ถูกเช็คใน get_current_user ตั้งใจ — user ที่ถูกระงับ
-# ยัง login/ดูข้อมูลของตัวเองได้ปกติ แต่จะถูกบล็อกเฉพาะตอนทำ action สำคัญ ผ่าน
-# require_access_approved (เพิ่ม webhook, ขอ/regenerate API key) และ require_api_key
-# (ระบบอัตโนมัติของ user ยิงเข้ามาเอง เช่น POST /my/cameras) เท่านั้น
-#
-# [Async Migration]: require_admin, require_terms_accepted ไม่แตะ DB เลย (แค่เช็ค attribute
-# ของ current_user ที่ get_current_user โหลดมาให้แล้ว) จึงยังเป็น sync def ได้ตามเดิม —
-# FastAPI รองรับ dependency chain ที่ผสม sync/async ปนกันได้ปกติ (sync ตัวไหนไม่มี I/O ก็
-# รันเร็วอยู่แล้ว ไม่จำเป็นต้องแปลงเป็น async ทุกจุด)
-# ---------------------------------------------------------------------------
-
 def require_admin(current_user: models.User = Depends(get_current_user)) -> models.User:
     if not current_user.is_admin:
         raise HTTPException(

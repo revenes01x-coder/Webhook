@@ -10,13 +10,7 @@ T = TypeVar("T")
 DEFAULT_PAGE_SIZE = 10
 MAX_PAGE_SIZE = 100
 
-
 class PageParams:
-    """Dependency กลางสำหรับรับ page/page_size จาก query string
-    ใช้ร่วมกันได้ทุก endpoint ที่ list ข้อมูล ผ่าน Depends(PageParams)
-    เช่น: page_params: PageParams = Depends()
-
-    (ไม่แตะ DB เลย ไม่ต้องเป็น async)"""
 
     def __init__(
         self,
@@ -32,14 +26,12 @@ class PageParams:
         self.page_size = page_size
         self.offset = (page - 1) * page_size
 
-
 class PaginatedResponse(BaseModel, Generic[T]):
     items: List[T]
     total: int
     page: int
     page_size: int
     total_pages: int
-
 
 async def paginate(db: AsyncSession, query: Select, params: PageParams) -> dict:
     count_query = select(func.count()).select_from(query.order_by(None).subquery())
