@@ -3,6 +3,8 @@ import uuid
 import ipaddress
 import mimetypes
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.poolmanager import PoolManager
 from datetime import datetime
 from functools import lru_cache
 from urllib.parse import urlparse, urlunparse
@@ -57,6 +59,63 @@ def build_test_webhook_payload() -> tuple[str, dict, dict]:
     return test_event_id, form_data, files
 
 
+class _PinnedHostnameHTTPSAdapter(HTTPAdapter):
+    """
+    Mount เข้ากับ requests.Session() เฉพาะ scheme https:// ก่อนยิง POST ทดสอบใน
+    verify_webhook_url() เท่านั้น — สร้างใหม่ทุกครั้งที่เรียก (ไม่ reuse/cache ข้าม request)
+    เพราะผูก hostname เดียวไว้ตายตัวตอน __init__
+
+    เหตุผลที่ต้องมี adapter เอง: ถ้าแค่เอา pinned_url (host เป็น IP) ไปยิงตรงๆ ผ่าน requests
+    ปกติ — urllib3 (ที่ requests ใช้ข้างใน) จะเอา host จาก pinned_url ไปใช้ทำทั้ง TLS SNI และ
+    cert hostname verification โดย default กลายเป็น verify cert กับ IP literal แทน hostname
+    จริง (ปลายทางส่วนใหญ่ cert ไม่ได้ออกให้ IP เลย จะ verify fail) — ต้อง inject
+    server_hostname/assert_hostname เข้า connection pool ตรงๆ เพื่อบังคับให้ SNI + cert check
+    ยังอิง hostname เดิม แม้ว่า connection จริงจะไปที่ IP ที่ pin ไว้แล้วก็ตาม
+    """
+
+    def __init__(self, hostname: str):
+        self._hostname = hostname
+        super().__init__()
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["server_hostname"] = self._hostname
+        kwargs["assert_hostname"] = self._hostname
+        self.poolmanager = PoolManager(*args, **kwargs)
+
+
+def _build_pinned_https_request(url: str) -> tuple[str, str, dict]:
+    """
+    Sync version ของแนวคิด "pin IP" (เทียบเท่ากับ resolve_rtsp_url_pinned ฝั่ง RTSP และ
+    build_pinned_request ฝั่ง httpx) — สำหรับ verify_webhook_url() ที่ใช้ requests (sync)
+    คืน (pinned_url, hostname, headers) ให้ caller เอาไปยิงผ่าน session ที่ mount
+    _PinnedHostnameHTTPSAdapter(hostname) แล้ว
+
+    resolve+เช็ค IP ครั้งเดียวตรงนี้ แล้ว "ต่อ connection" ไปที่ IP นั้นตรงๆ (แทนที่จะปล่อยให้
+    requests.post() resolve DNS ซ้ำเองตอนยิงจริง) ปิดช่อง DNS rebinding แบบ TOCTOU ที่โดเมน
+    เปลี่ยน DNS record ให้ชี้ internal IP พอดีในช่วงเสี้ยววินาทีระหว่างเช็คกับยิงจริง
+
+    raise SSRFBlockedError เหมือน resolve_and_check_ip เดิมทุกประการ (ไม่พบ host ใน URL,
+    resolve ไม่ได้, หรือ IP เป็น private/loopback/link-local)
+    """
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        raise SSRFBlockedError("ไม่พบ host ใน URL")
+
+    ip = resolve_and_check_ip(hostname)
+
+    ip_obj = ipaddress.ip_address(ip)
+    host_str = f"[{ip}]" if ip_obj.version == 6 else ip
+    netloc = host_str
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+
+    pinned_url = urlunparse(parsed._replace(netloc=netloc))
+    # Host header ต้องส่งมาเองตรงๆ ไม่งั้น urllib3 จะเอา host จาก pinned_url (=IP) ไปตั้ง
+    # Host header อัตโนมัติแทน ทำให้ปลายทางที่ทำ virtual host route ผิดเว็บ
+    return pinned_url, hostname, {"Host": hostname}
+
+
 def verify_webhook_url(url: str):
     """
     ตรวจสอบ URL เพื่อป้องกัน SSRF และยืนยันว่าปลายทางพร้อมรับข้อมูลได้จริง
@@ -65,6 +124,13 @@ def verify_webhook_url(url: str):
     เรียกครั้งเดียวตอน POST /webhook/add เท่านั้น (สร้าง endpoint ใหม่) — การเช็คซ้ำก่อนยิงจริง
     ทุกครั้งอยู่ที่ is_url_host_safe() ด้านล่าง ซึ่ง worker.py เรียกเองก่อน client.post() ทุกครั้ง
     เพื่อกัน DNS rebinding (โดเมนถูกเปลี่ยน DNS record หลังผ่านการเช็คตอนสร้าง endpoint ไปแล้ว)
+
+    [DNS rebinding fix]: ตัว POST ทดสอบในฟังก์ชันนี้เองก็ยิงด้วย IP ที่ resolve+เช็คแล้วตรงๆ
+    (ผ่าน _build_pinned_https_request + _PinnedHostnameHTTPSAdapter) แทนที่จะปล่อยให้ requests
+    resolve DNS ซ้ำเองตอน post() จริง — ปิดช่องที่โดเมนถูกเปลี่ยน DNS record ให้ชี้ internal IP
+    พอดีในช่วงเสี้ยววินาทีระหว่างเช็คกับยิงจริง (เดิม resolve_and_check_ip เช็คแล้วทิ้งผล ปล่อยให้
+    requests.post(url, ...) resolve เองอีกรอบ = ช่อง TOCTOU) เทียบเท่ากับที่
+    resolve_rtsp_url_pinned()/build_pinned_request() ปิดให้ฝั่ง RTSP/httpx ไปแล้ว
     """
     parsed_url = urlparse(url)
 
@@ -75,11 +141,10 @@ def verify_webhook_url(url: str):
             detail="เพื่อความปลอดภัย URL ต้องเป็น HTTPS เท่านั้น"
         )
 
-    hostname = parsed_url.hostname
-
-    # 2-3. แปลง DNS -> IP แล้วเช็ค private/loopback/link-local (logic กลางอยู่ที่ ip_guard.py)
+    # 2-3. แปลง DNS -> IP, เช็ค private/loopback/link-local (ip_guard.py) แล้วคืน URL ที่
+    # ต่อด้วย IP ตรงๆ ไว้ยิงจริงด้านล่าง (resolve ครั้งเดียว ไม่ให้ requests resolve ซ้ำเอง)
     try:
-        resolve_and_check_ip(hostname)
+        pinned_url, hostname, pin_headers = _build_pinned_https_request(url)
     except SSRFBlockedError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -96,8 +161,17 @@ def verify_webhook_url(url: str):
             detail=str(e),
         )
 
+    session = requests.Session()
+    session.mount("https://", _PinnedHostnameHTTPSAdapter(hostname))
+
     try:
-        response = requests.post(url, data=dummy_payload, files=dummy_files, timeout=5)
+        response = session.post(
+            pinned_url,
+            data=dummy_payload,
+            files=dummy_files,
+            headers=pin_headers,
+            timeout=5,
+        )
 
         # 5. เช็คว่าตอบกลับ 2xx OK ไหม
         if response.status_code // 100 != 2:
@@ -129,6 +203,8 @@ def verify_webhook_url(url: str):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ปลายทางได้: {str(e)}"
         )
+    finally:
+        session.close()
 
     return True
 
@@ -144,6 +220,12 @@ def is_url_host_safe(url: str) -> bool:
 
     คืน True/False เฉยๆ ไม่ raise เพราะ caller (worker.py) ไม่ได้อยู่ใน request context —
     ต้องจัดการผลลัพธ์เป็น "ส่งไม่สำเร็จ" ธรรมดาแล้วปล่อยให้เข้า retry/circuit-breaker logic เดิม
+
+    หมายเหตุ: ฟังก์ชันนี้เช็คแล้ว "ทิ้งผล" เหมือนกัน (worker.py ยิงจริงด้วย client.post(url,...)
+    ที่ resolve ซ้ำเอง) จึงยังมีช่อง TOCTOU เดียวกันเหลืออยู่ฝั่งนี้ — ถ้าต้องการปิดให้ครบแบบ
+    เดียวกับ verify_webhook_url ด้านบน ต้องเปลี่ยน worker.py ไปใช้ build_pinned_request()
+    (แพทเทิร์นเดียวกับ resolve_rtsp_url_pinned) แทน is_url_host_safe() ตรงนี้ — นอก scope
+    ของการแก้ครั้งนี้ (เห็นแค่ verify_webhook_url ที่ยัง unpinned ตามที่ระบุมา) บอกได้ถ้าอยากแก้ต่อ
     """
     hostname = urlparse(url).hostname
     if not hostname:
@@ -154,33 +236,23 @@ def is_url_host_safe(url: str) -> bool:
     except SSRFBlockedError:
         return False
 
-
 def build_pinned_request(url: str) -> tuple[str, dict]:
     """
-    [DNS rebinding fix — HTTPS]: is_url_host_safe() ด้านบนเช็คแล้วว่า hostname resolve ไปยัง
-    IP ที่ปลอดภัย ณ ตอนเช็ค แต่ระหว่างช่วงที่เช็คเสร็จกับช่วงที่ client.post() ยิงจริง (คนละ
-    DNS lookup กันคนละครั้ง) เจ้าของโดเมนที่ตั้งใจร้ายสามารถสลับ DNS record ให้ชี้เข้า internal
-    IP ได้ทันภายในช่วงเวลานั้น (TTL=0 + authoritative DNS เป็นของตัวเอง) เป็นช่องโหว่ TOCTOU
-    แบบเดียวกับที่ resolve_rtsp_url_pinned() ใน camera_url_guard.py ปิดไปแล้วฝั่ง RTSP
-
-    ฝั่ง HTTPS ปิดด้วยวิธีเดียวกันตรงๆ ไม่ได้ (แทน hostname ด้วย IP ตรงๆ ใน URL) เพราะ:
-    - TLS cert ของปลายทางออกให้กับชื่อโดเมน ไม่ใช่ IP — ต่อด้วย IP ตรงๆ จะ validate cert ไม่ผ่าน
-    - ปลายทางที่ทำ virtual host (เซิร์ฟเวอร์เดียวรองรับหลายโดเมน) จะ route ผิดเว็บถ้า Host header
-      กลายเป็น IP แทนชื่อโดเมนเดิม
-
-    วิธีแก้: resolve+เช็ค IP ครั้งเดียว แล้ว "ต่อ connection" ไปที่ IP นั้นตรงๆ แต่ยังคง
-    Host header และ TLS SNI เป็น hostname เดิม — httpx.AsyncClient ยัง validate cert กับ
-    hostname เดิมได้ปกติผ่าน extension "sni_hostname" (รองรับตั้งแต่ httpx 0.21+) เพราะ hostname
-    ที่ resolve มาแล้วไม่มีการ resolve ซ้ำอีกรอบตอนต่อจริง ปิดช่อง race นี้ได้สมบูรณ์เหมือน RTSP
+    [DNS rebinding fix — httpx]: เหมือน _build_pinned_https_request() ด้านบนแต่คืนรูปแบบ
+    kwargs ที่ httpx.AsyncClient ใช้ได้ตรงๆ (worker.py ใช้ httpx ไม่ใช่ requests) —
+    resolve+เช็ค IP ครั้งเดียวแล้ว "ต่อ connection" ไปที่ IP นั้นตรงๆ แต่ยังคง Host header
+    และ TLS SNI เป็น hostname เดิม — httpx validate cert กับ hostname เดิมได้ปกติผ่าน
+    extension "sni_hostname" (รองรับตั้งแต่ httpx 0.21+) ปิดช่อง TOCTOU เดียวกับที่
+    resolve_rtsp_url_pinned() ปิดให้ฝั่ง RTSP ไปแล้ว
 
     คืน (pinned_url, extra_kwargs) — caller ต้อง unpack extra_kwargs เข้า client.post(...)
-    เสมอ (เช่น client.post(pinned_url, **extra_kwargs, data=..., files=..., timeout=...))
+    เสมอ เช่น client.post(pinned_url, **extra_kwargs, data=..., files=..., timeout=...)
     ห้ามยิงแค่ pinned_url เฉยๆ โดยไม่ใส่ extra_kwargs เพราะจะกลายเป็นต่อด้วย IP ตรงๆ แบบ RTSP
-    ซึ่งฝั่ง HTTPS จะ cert validation fail / เข้าผิด virtual host ตามเหตุผลด้านบน
+    ซึ่งฝั่ง HTTPS จะ cert validation fail / เข้าผิด virtual host
 
-    raise SSRFBlockedError เหมือน resolve_and_check_ip เดิมทุกประการ (ไม่พบ host ใน URL,
-    resolve ไม่ได้, หรือ IP เป็น private/loopback/link-local) — caller (worker.py) จับเองแล้ว
-    แปลงเป็น "ส่งไม่สำเร็จ" ธรรมดา ไม่ raise HTTPException เพราะไม่ได้อยู่ใน request context
+    raise SSRFBlockedError เหมือน resolve_and_check_ip เดิมทุกประการ — caller (worker.py)
+    จับเองแล้วแปลงเป็น "ส่งไม่สำเร็จ" ธรรมดา ไม่ raise HTTPException เพราะไม่ได้อยู่ใน
+    request context
     """
     parsed = urlparse(url)
     hostname = parsed.hostname

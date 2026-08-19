@@ -474,7 +474,7 @@ async def verify_pending_cameras():
     (verify_attempt_count < CAMERA_VERIFY_MAX_ATTEMPTS) ทีละตัว ลอง connect RTSP จริงแบบมี timeout
 
     ผ่าน -> is_active=True, verification_status='verified'
-    ไม่ผ่านแต่ยังไม่ครบโควต้า -> verification_status='failed' รอ job รอบหน้าลองใหม่ (ทุก 2 นาที)
+    ไม่ผ่านแต่ยังไม่ครบโควต้า -> verification_status='failed' รอ job รอบหน้าลองใหม่ (ทุก 1 นาที)
     ไม่ผ่านและครบโควต้าแล้ว -> [Bounded Retry] ลบ row ทิ้งเลย ไม่ค้างเป็น failed ตลอดไป
     partner จะรู้ผลเองตอนยิง GET /partner/cameras/{id} แล้วเจอ 404 (ดู routers/partner.py)
     """
