@@ -31,7 +31,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     else:
         expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
 
-    to_encode.update({"exp": expire, "jti": uuid.uuid4().hex})
+    to_encode.update({"exp": expire, "jti": uuid.uuid4().hex, "purpose": "access"})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
@@ -128,6 +128,9 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
         email: str = payload.get("sub")
         jti: str | None = payload.get("jti")
         if email is None:
+            raise credentials_exception
+
+        if payload.get("purpose") != "access":
             raise credentials_exception
     except JWTError:
         raise credentials_exception

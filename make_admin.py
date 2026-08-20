@@ -6,7 +6,7 @@
     python make_admin.py user@example.com --revoke
 """
 import sys
-from smartlpr.database import SessionLocal
+from smartlpr.database_sync import SessionLocal  # <-- แก้: ต้องใช้ sync SessionLocal (db.query ใช้กับ async session ไม่ได้)
 from smartlpr import models
 
 

@@ -171,3 +171,15 @@ def send_webhook_enabled_email(to_email: str, target_url: str) -> None:
     </div>
     """
     _send_email(to_email, subject, html)
+
+def send_password_changed_email(to_email: str) -> None:
+    subject = "แจ้งเตือน: รหัสผ่านบัญชีของท่านถูกเปลี่ยนแปลง - SmartLPR"
+    html = """
+    <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+      <p>รหัสผ่านสำหรับเข้าสู่ระบบ SmartLPR ของท่านเพิ่งถูกเปลี่ยนแปลงสำเร็จผ่านขั้นตอนลืมรหัสผ่าน</p>
+      <p>เพื่อความปลอดภัย ระบบได้บังคับให้ทุกอุปกรณ์ที่เคยเข้าสู่ระบบไว้ต้องเข้าสู่ระบบใหม่อีกครั้ง</p>
+      <p><strong>หากท่านไม่ได้เป็นผู้ทำรายการนี้</strong> กรุณาติดต่อผู้ดูแลระบบทันที เนื่องจากอาจมีบุคคลอื่น
+      เข้าถึงอีเมลหรือบัญชีของท่านโดยไม่ได้รับอนุญาต</p>
+    </div>
+    """
+    _send_email(to_email, subject, html)

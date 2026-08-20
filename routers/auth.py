@@ -1,3 +1,4 @@
+import logging
 import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -29,7 +30,7 @@ from services.rate_limiter import (
     check_and_record,
 )
 from services.token import generate_otp, hash_otp, verify_otp, generate_refresh_token, hash_refresh_token
-from services.email_service import send_otp_email, send_password_reset_otp_email
+from services.email_service import (send_otp_email, send_password_reset_otp_email,send_password_changed_email,)
 from smartlpr.config import (
     OTP_EXPIRE_MINUTES,
     OTP_MAX_ATTEMPTS,
@@ -56,6 +57,9 @@ REGISTER_LOCKOUT_MINUTES = 5
 
 RESET_PASSWORD_LOCKOUT_LIMIT = 5
 RESET_PASSWORD_LOCKOUT_MINUTES = 5
+
+FORGOT_PASSWORD_IP_LOCKOUT_LIMIT = 10
+FORGOT_PASSWORD_IP_LOCKOUT_MINUTES = 15
 
 
 async def _issue_refresh_token(db: AsyncSession, user: models.User, family_id: str | None = None) -> str:
@@ -428,7 +432,20 @@ async def refresh_access_token(
 
 
 @router.post("/forgot-password")
-async def forgot_password(payload: schemas.ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+async def forgot_password(
+    payload: schemas.ForgotPasswordRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    client_ip = request.client.host
+    await check_and_record(
+        db,
+        f"forgot_password_ip_{client_ip}",
+        "forgot_password_ip",
+        limit=FORGOT_PASSWORD_IP_LOCKOUT_LIMIT,
+        window_minutes=FORGOT_PASSWORD_IP_LOCKOUT_MINUTES,
+    )
+
     result = await db.execute(select(models.User).filter(models.User.email == payload.email))
     user = result.scalar_one_or_none()
     generic_message = {"message": "หากอีเมลนี้อยู่ในระบบ เราได้ส่ง OTP สำหรับตั้งรหัสผ่านใหม่ไปให้แล้ว"}
@@ -559,9 +576,6 @@ async def reset_password(payload: schemas.ResetPasswordRequest, request: Request
     user.hashed_password = get_password_hash(payload.new_password)
     await db.commit()
 
-    # เผา token ใบนี้ทิ้งทันทีหลังใช้สำเร็จ (single-use) — บันทึก jti ลง revoked_tokens
-    # ตารางเดียวกับที่ access token ใช้ (revoke_token รู้แค่ jti/exp ไม่สนใจ purpose)
-    # กัน token ใบเดิมถูกเอากลับมาใช้ตั้งรหัสผ่านซ้ำอีก ต่อให้ยังไม่หมดอายุตามเวลาก็ตาม
     await revoke_token(db, payload.reset_token)
 
     active_families_result = await db.execute(
@@ -576,8 +590,12 @@ async def reset_password(payload: schemas.ResetPasswordRequest, request: Request
     for (family_id,) in active_families:
         await _revoke_token_family(db, family_id)
 
-    return {"message": "ตั้งรหัสผ่านใหม่สำเร็จ กรุณาเข้าสู่ระบบด้วยรหัสผ่านใหม่"}
+    try:
+        await asyncio.to_thread(send_password_changed_email, user.email)
+    except RuntimeError as e:
+        logging.error(f"ส่งอีเมลแจ้งเปลี่ยนรหัสผ่าน user_id={user.id} ไม่สำเร็จ: {e}")
 
+    return {"message": "ตั้งรหัสผ่านใหม่สำเร็จ กรุณาเข้าสู่ระบบด้วยรหัสผ่านใหม่"}
 
 @router.post("/logout")
 async def logout(
