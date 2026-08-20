@@ -194,8 +194,6 @@ async def register_user(user: schemas.UserCreate, request: Request, db: AsyncSes
                     },
                 )
 
-        # อัปเดตรหัสผ่านให้ตรงกับที่กรอกล่าสุดเสมอ (เผื่อพิมพ์ผิด/จำรหัสเดิมไม่ได้ตอนสมัครครั้งแรก
-        # — ยังไม่ verify แปลว่าบัญชียังไม่ active จริง เปลี่ยนรหัสผ่านตรงนี้ได้โดยไม่ต้องยืนยันตัวตนซ้ำ)
         db_user.hashed_password = hashed_password
         await db.commit()
         new_user = db_user
@@ -236,10 +234,12 @@ async def verify_otp_endpoint(payload: schemas.OtpVerifyRequest, db: AsyncSessio
         return {"message": "บัญชีนี้ยืนยันตัวตนไปแล้ว"}
 
     otp_result = await db.execute(
-        select(models.OtpVerification).filter(
+        select(models.OtpVerification)
+        .filter(
             models.OtpVerification.user_id == user.id,
             models.OtpVerification.purpose == REGISTER_PURPOSE,
         )
+        .with_for_update()  # [Race Fix]: ล็อกแถวกัน concurrent request อ่าน attempt_count เก่าซ้ำกัน (lost update)
     )
     otp_record = otp_result.scalar_one_or_none()
 
@@ -285,7 +285,7 @@ async def verify_otp_endpoint(payload: schemas.OtpVerifyRequest, db: AsyncSessio
 
 
 @router.post("/resend-otp")
-async def resend_otp(payload: schemas.OtpResendRequest, db: AsyncSession = Depends(get_db)):
+async def resend_otp(payload: schemas.OtpResendRequest, request: Request, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(models.User).filter(models.User.email == payload.email))
     user = result.scalar_one_or_none()
     if not user:
@@ -294,7 +294,8 @@ async def resend_otp(payload: schemas.OtpResendRequest, db: AsyncSession = Depen
     if user.is_verified:
         return {"message": "บัญชีนี้ยืนยันตัวตนไปแล้ว ไม่จำเป็นต้องขอ OTP อีก"}
 
-    lockout_key = f"resend_otp_{payload.email}"
+    client_ip = request.client.host
+    lockout_key = f"resend_otp_{payload.email}_{client_ip}"
 
     await check_and_record(db, lockout_key, "resend_otp",
     limit=OTP_RESEND_LIMIT_PER_HOUR, window_minutes=60)
@@ -310,8 +311,6 @@ async def resend_otp(payload: schemas.OtpResendRequest, db: AsyncSession = Depen
         elapsed = (datetime.now(timezone.utc) - latest_otp.created_at).total_seconds()
         if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
             wait_more = int(OTP_RESEND_COOLDOWN_SECONDS - elapsed)
-            # detail เป็น dict (เหมือน check_lockout) ให้ frontend อ่าน retry_after_seconds
-            # ไปนับถอยหลัง/disable ปุ่ม "ส่ง OTP อีกครั้ง" ได้ตรงเวลาจริง แทนที่จะ parse ข้อความเอา
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail={
@@ -504,25 +503,28 @@ async def verify_reset_otp(payload: schemas.VerifyResetOtpRequest, request: Requ
         limit=5,
         window_minutes=15,
     )
+    invalid_otp_exception = HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="OTP ไม่ถูกต้องหรือหมดอายุ กรุณาขอ OTP ใหม่",
+    )
 
     result = await db.execute(select(models.User).filter(models.User.email == payload.email))
     user = result.scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OTP ไม่ถูกต้องหรือหมดอายุ")
+        raise invalid_otp_exception
 
     otp_result = await db.execute(
-        select(models.OtpVerification).filter(
+        select(models.OtpVerification)
+        .filter(
             models.OtpVerification.user_id == user.id,
             models.OtpVerification.purpose == PASSWORD_RESET_PURPOSE,
         )
+        .with_for_update()  # [Race Fix]: เหมือน verify_otp_endpoint กัน lost update บน attempt_count
     )
     otp_record = otp_result.scalar_one_or_none()
 
     if not otp_record or otp_record.is_used:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="ไม่พบ OTP ที่ใช้งานได้ กรุณาขอ OTP ใหม่",
-        )
+        raise invalid_otp_exception
 
     now = datetime.now(timezone.utc)
     if now > otp_record.expires_at:
