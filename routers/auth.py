@@ -61,6 +61,12 @@ RESET_PASSWORD_LOCKOUT_MINUTES = 5
 FORGOT_PASSWORD_IP_LOCKOUT_LIMIT = 10
 FORGOT_PASSWORD_IP_LOCKOUT_MINUTES = 15
 
+# [Change Password]: ต่างจาก RESET_PASSWORD_* ตรงที่ flow นี้ user login อยู่แล้ว (ไม่ผ่าน OTP)
+# คีย์ lockout ผูกกับ user.id ตรงๆ (ไม่ผูก IP เหมือน reset-password ที่ยังไม่ login) กันคนเดา
+# current_password รัวๆ ใส่บัญชีที่ session หลุดมือไป
+CHANGE_PASSWORD_LOCKOUT_LIMIT = 5
+CHANGE_PASSWORD_LOCKOUT_MINUTES = 15
+
 
 async def _issue_refresh_token(db: AsyncSession, user: models.User, family_id: str | None = None) -> str:
     """สร้าง refresh token ใหม่ 1 ใบ คืน plaintext ให้ caller เอาไปตั้ง cookie (เก็บแค่ hash ลง DB)
@@ -111,6 +117,23 @@ async def _revoke_token_family(db: AsyncSession, family_id: str) -> None:
         .values(is_revoked=True)
     )
     await db.commit()
+
+
+async def _revoke_all_sessions(db: AsyncSession, user_id: int) -> None:
+    """Revoke refresh token ทุก family ที่ยังไม่ถูก revoke ของ user คนนี้ — ใช้ร่วมกันทั้ง
+    reset_password (ผ่าน OTP ตอนลืมรหัสผ่าน) และ change_password (login อยู่แล้ว เปลี่ยนเฉยๆ)
+    บังคับให้ทุกอุปกรณ์ที่เคย login ไว้ต้อง login ใหม่หลังรหัสผ่านเปลี่ยน — กันเคส token เก่าหลุด
+    ไปอยู่ในมือคนอื่นตั้งแต่ก่อนเปลี่ยนรหัสผ่านแล้วยังใช้ต่อได้เรื่อยๆ"""
+    active_families_result = await db.execute(
+        select(models.RefreshToken.family_id)
+        .filter(
+            models.RefreshToken.user_id == user_id,
+            models.RefreshToken.is_revoked == False,  # noqa: E712
+        )
+        .distinct()
+    )
+    for (family_id,) in active_families_result.all():
+        await _revoke_token_family(db, family_id)
 
 
 async def _create_and_send_otp(db: AsyncSession, user: models.User, purpose: str = REGISTER_PURPOSE) -> models.OtpVerification:
@@ -580,17 +603,7 @@ async def reset_password(payload: schemas.ResetPasswordRequest, request: Request
 
     await revoke_token(db, payload.reset_token)
 
-    active_families_result = await db.execute(
-        select(models.RefreshToken.family_id)
-        .filter(
-            models.RefreshToken.user_id == user.id,
-            models.RefreshToken.is_revoked == False,  # noqa: E712
-        )
-        .distinct()
-    )
-    active_families = active_families_result.all()
-    for (family_id,) in active_families:
-        await _revoke_token_family(db, family_id)
+    await _revoke_all_sessions(db, user.id)
 
     try:
         await asyncio.to_thread(send_password_changed_email, user.email)
@@ -598,6 +611,43 @@ async def reset_password(payload: schemas.ResetPasswordRequest, request: Request
         logging.error(f"ส่งอีเมลแจ้งเปลี่ยนรหัสผ่าน user_id={user.id} ไม่สำเร็จ: {e}")
 
     return {"message": "ตั้งรหัสผ่านใหม่สำเร็จ กรุณาเข้าสู่ระบบด้วยรหัสผ่านใหม่"}
+
+
+@router.post("/change-password")
+async def change_password(
+    payload: schemas.ChangePasswordRequest,
+    db: AsyncSession = Depends(get_db),
+    token: str = Depends(oauth2_scheme),
+    current_user: models.User = Depends(get_current_user),
+):
+    lockout_key = f"change_password_{current_user.id}"
+
+    await check_and_record(
+        db, lockout_key, "change_password",
+        limit=CHANGE_PASSWORD_LOCKOUT_LIMIT, window_minutes=CHANGE_PASSWORD_LOCKOUT_MINUTES,
+    )
+
+    if not verify_password(payload.current_password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="รหัสผ่านปัจจุบันไม่ถูกต้อง",
+        )
+
+    await clear_lockout(db, lockout_key, "change_password")
+
+    current_user.hashed_password = get_password_hash(payload.new_password)
+    await db.commit()
+
+    await revoke_token(db, token)
+    await _revoke_all_sessions(db, current_user.id)
+
+    try:
+        await asyncio.to_thread(send_password_changed_email, current_user.email)
+    except RuntimeError as e:
+        logging.error(f"ส่งอีเมลแจ้งเปลี่ยนรหัสผ่าน user_id={current_user.id} ไม่สำเร็จ: {e}")
+
+    return {"message": "เปลี่ยนรหัสผ่านสำเร็จ ระบบให้ทุกอุปกรณ์ต้องเข้าสู่ระบบใหม่อีกครั้งเพื่อความปลอดภัย"}
+
 
 @router.post("/logout")
 async def logout(
@@ -632,4 +682,32 @@ def get_me(current_user: models.User = Depends(get_current_user)):
         has_api_key=current_user.api_key_hash is not None,
         is_suspended=current_user.is_suspended,
         suspended_reason=current_user.suspended_reason,
+        full_name=current_user.full_name,
+        phone=current_user.phone,
+        created_at=current_user.created_at,
+    )
+
+
+@router.patch("/me", response_model=schemas.UserMeResponse)
+async def update_me(
+    payload: schemas.ProfileUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    current_user.full_name = payload.full_name
+    current_user.phone = payload.phone
+    await db.commit()
+    await db.refresh(current_user)
+
+    return schemas.UserMeResponse(
+        email=current_user.email,
+        is_verified=current_user.is_verified,
+        terms_accepted=current_user.terms_accepted,
+        is_admin=current_user.is_admin,
+        has_api_key=current_user.api_key_hash is not None,
+        is_suspended=current_user.is_suspended,
+        suspended_reason=current_user.suspended_reason,
+        full_name=current_user.full_name,
+        phone=current_user.phone,
+        created_at=current_user.created_at,
     )

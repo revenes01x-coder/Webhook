@@ -15,6 +15,9 @@ class User(Base):
     is_suspended = Column(Boolean, default=False, nullable=False)
     suspended_reason = Column(Text, nullable=True)  # เหตุผลที่ admin ระบุตอนระงับ (ไม่บังคับ)
     api_key_hash = Column(String, nullable=True, unique=True, index=True)
+    full_name = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
