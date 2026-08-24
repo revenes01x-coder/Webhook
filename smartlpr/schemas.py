@@ -477,3 +477,14 @@ class UserSuspendUpdate(BaseModel):
             return v
         v = v.strip()
         return v or None
+
+# ---- สำหรับ Admin Audit Log ----
+class AdminAuditLogResponse(BaseModel):
+    id: int
+    admin_id: int
+    admin_email: str
+    action: str
+    target_type: str
+    target_id: Optional[str] = None
+    detail: Optional[dict] = None
+    created_at: datetime

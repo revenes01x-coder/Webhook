@@ -10,6 +10,7 @@ from smartlpr import models
 import smartlpr.schemas as schemas
 from smartlpr.database import get_db
 from smartlpr.security import require_admin
+from services.audit_log import log_admin_action
 from services.email_service import (
     send_access_approved_email,
     send_access_rejected_email,
@@ -86,6 +87,20 @@ async def review_access_request(
     else:
         req.status = "rejected"
         req.admin_note = payload.admin_note  # ไม่บังคับ อาจเป็น None
+
+    # [Audit Log]: บันทึกก่อน commit เสมอ ให้ commit เดียวกันครอบทั้ง action หลักและ log
+    # การันตี atomicity — action สำเร็จ = ต้องมี log คู่กันเสมอ (ดู services/audit_log.py)
+    log_admin_action(
+        db, admin.id,
+        action=f"access_request.{payload.decision}",
+        target_type="access_request",
+        target_id=req.id,
+        detail={
+            "organization_name": req.organization_name,
+            "requester_user_id": req.user_id,
+            "admin_note": req.admin_note,
+        },
+    )
 
     await db.commit()
     await db.refresh(req)
@@ -248,6 +263,16 @@ async def set_user_suspend_status(
 
     user.is_suspended = payload.is_suspended
     user.suspended_reason = payload.admin_note if payload.is_suspended else None
+
+    # [Audit Log]: เหมือน review_access_request — บันทึกก่อน commit ให้อยู่ transaction เดียวกัน
+    log_admin_action(
+        db, admin.id,
+        action="user.suspend" if payload.is_suspended else "user.unsuspend",
+        target_type="user",
+        target_id=user.id,
+        detail={"user_email": user.email, "admin_note": user.suspended_reason},
+    )
+
     await db.commit()
     await db.refresh(user)
 
@@ -298,6 +323,15 @@ async def set_webhook_status(
     # แตะในฟังก์ชันนี้เลย อ่านตอนไหนก็ค่าเดิม แค่เขียนให้ชัดเจนว่าอ่านจากตอนไหน)
     was_unhealthy = not endpoint.is_healthy
 
+    # [Audit Log]: เหมือน 2 endpoint ด้านบน — บันทึกก่อน commit ให้อยู่ transaction เดียวกัน
+    log_admin_action(
+        db, admin.id,
+        action="webhook.enable" if payload.is_active else "webhook.disable",
+        target_type="webhook_endpoint",
+        target_id=endpoint.id,
+        detail={"url": endpoint.url, "admin_note": endpoint.disabled_reason},
+    )
+
     await db.commit()
     await db.refresh(endpoint)
 
@@ -320,3 +354,63 @@ async def set_webhook_status(
         background_tasks.add_task(resume_endpoint_now, endpoint.id)
 
     return endpoint
+
+
+@router.get("/audit-log", response_model=schemas.PaginatedResponse[schemas.AdminAuditLogResponse])
+async def list_admin_audit_log(
+    admin_id: Optional[int] = Query(default=None, description="กรองเฉพาะรายการที่ทำโดย admin คนนี้ (exact match)"),
+    action: Optional[str] = Query(default=None, description="กรองตาม action เช่น 'user.suspend', 'webhook.disable' (exact match)"),
+    target_type: Optional[str] = Query(default=None, description="กรองตามประเภทเป้าหมาย: user / webhook_endpoint / access_request"),
+    target_id: Optional[str] = Query(default=None, description="กรองตาม target_id (exact match)"),
+    page_params: PageParams = Depends(),
+    db: AsyncSession = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+    """ประวัติการกระทำของ admin ทั้งหมดในระบบ (immutable — ไม่มี endpoint แก้ไข/ลบ record
+    ในตารางนี้โดยเจตนา) ครอบคลุมการอนุมัติ/ปฏิเสธคำขอใช้งาน, ระงับ/ปลดระงับ user,
+    เปิด/ปิด webhook endpoint — ดู services/audit_log.py และจุดที่เรียกใช้ในไฟล์นี้
+
+    join กับ users เพื่อโชว์อีเมลของ admin ที่ทำรายการแทนที่จะโชว์แค่ id เฉยๆ
+    ถูกลบทิ้งอัตโนมัติเป็นระยะตาม ADMIN_AUDIT_LOG_RETENTION_DAYS (ดู worker.py:cleanup_old_audit_logs)"""
+    base_query = (
+        select(models.AdminAuditLog, models.User.email)
+        .join(models.User, models.AdminAuditLog.admin_id == models.User.id)
+    )
+    if admin_id is not None:
+        base_query = base_query.filter(models.AdminAuditLog.admin_id == admin_id)
+    if action:
+        base_query = base_query.filter(models.AdminAuditLog.action == action)
+    if target_type:
+        base_query = base_query.filter(models.AdminAuditLog.target_type == target_type)
+    if target_id:
+        base_query = base_query.filter(models.AdminAuditLog.target_id == target_id)
+    base_query = base_query.order_by(models.AdminAuditLog.id.desc())
+
+    count_query = select(func.count()).select_from(base_query.order_by(None).subquery())
+    total = (await db.execute(count_query)).scalar_one()
+
+    rows_result = await db.execute(
+        base_query.offset(page_params.offset).limit(page_params.page_size)
+    )
+    rows = rows_result.all()
+    total_pages = (total + page_params.page_size - 1) // page_params.page_size if total else 0
+
+    return {
+        "items": [
+            schemas.AdminAuditLogResponse(
+                id=log.id,
+                admin_id=log.admin_id,
+                admin_email=admin_email,
+                action=log.action,
+                target_type=log.target_type,
+                target_id=log.target_id,
+                detail=log.detail,
+                created_at=log.created_at,
+            )
+            for log, admin_email in rows
+        ],
+        "total": total,
+        "page": page_params.page,
+        "page_size": page_params.page_size,
+        "total_pages": total_pages,
+    }

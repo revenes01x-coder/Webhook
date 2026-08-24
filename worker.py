@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from smartlpr import models
 from smartlpr.database import SessionLocal
 from services.email_service import send_webhook_endpoint_unhealthy_email
-from smartlpr.config import UNVERIFIED_USER_EXPIRE_HOURS, PLATE_DATA_RETENTION_DAYS, OTP_RETENTION_DAYS
+from smartlpr.config import (UNVERIFIED_USER_EXPIRE_HOURS, PLATE_DATA_RETENTION_DAYS, OTP_RETENTION_DAYS, ADMIN_AUDIT_LOG_RETENTION_DAYS)
 from security.ssrf_guard import build_pinned_request, build_test_webhook_payload
 from security.camera_url_guard import resolve_rtsp_url_pinned
 from security.ip_guard import SSRFBlockedError
@@ -638,6 +638,26 @@ async def cleanup_old_otp_records():
     finally:
         await db.close()
 
+async def cleanup_old_audit_logs():
+    """ลบ AdminAuditLog ที่เก่าเกิน ADMIN_AUDIT_LOG_RETENTION_DAYS (ดีฟอลต์ 365 วัน)"""
+    db: AsyncSession = SessionLocal()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=ADMIN_AUDIT_LOG_RETENTION_DAYS)
+        result = await db.execute(
+            delete(models.AdminAuditLog).where(models.AdminAuditLog.created_at <= cutoff)
+        )
+        await db.commit()
+        if result.rowcount:
+            logging.info(
+                f"ลบ Admin Audit Log ที่เก็บเกิน {ADMIN_AUDIT_LOG_RETENTION_DAYS} วัน "
+                f"จำนวน {result.rowcount} รายการ"
+            )
+    except Exception as e:
+        await db.rollback()
+        logging.error(f"Cleanup admin audit log ทำงานผิดพลาด: {e}")
+    finally:
+        await db.close()
+
 async def resume_endpoint_now(endpoint_id: int) -> None:
     await process_graveyard_resume(endpoint_ids=[endpoint_id])
 
@@ -651,5 +671,6 @@ def start_scheduler():
     scheduler.add_job(cleanup_expired_revoked_tokens, 'interval', hours=1)
     scheduler.add_job(cleanup_expired_refresh_tokens, 'interval', hours=1)
     scheduler.add_job(cleanup_old_otp_records, 'interval', hours=24)
+    scheduler.add_job(cleanup_old_audit_logs, 'interval', hours=24)
     scheduler.start()
     return scheduler

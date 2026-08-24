@@ -157,3 +157,14 @@ class RefreshToken(Base):
     is_revoked = Column(Boolean, default=False, nullable=False, index=True)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class AdminAuditLog(Base):
+    __tablename__ = "admin_audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    admin_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    action = Column(String, nullable=False, index=True)        # เช่น "user.suspend", "webhook.disable"
+    target_type = Column(String, nullable=False, index=True)   # "user" / "webhook_endpoint" / "access_request"
+    target_id = Column(String, nullable=True, index=True)      # string ไว้เผื่อ target ในอนาคตเป็น id ที่ไม่ใช่ int (เช่น camera_id)
+    detail = Column(JSON, nullable=True)                       # context เพิ่มเติม เช่น admin_note, url, email ของเป้าหมาย
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
