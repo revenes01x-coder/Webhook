@@ -211,17 +211,15 @@ async def list_cameras(
         default=None,
         description="กรองเฉพาะกล้องของเจ้าของ (owner_user_id) คนนี้เท่านั้น (exact match) — ไม่ระบุ = ดูทั้งหมด",
     ),
+    owner_email: Optional[str] = Query(
+        default=None,
+        description="กรองเฉพาะกล้องของเจ้าของที่อีเมลมีข้อความนี้อยู่ (partial, case-insensitive) — ไม่ระบุ = ดูทั้งหมด",
+    ),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    """ดูกล้องทั้งหมดในระบบ ไม่ว่าใครเป็นเจ้าของ พร้อมสถานะ webhook ปลายทางที่ผูกไว้
-    (webhook_is_active) ให้เห็นได้เลยว่ากล้องไหน is_active=True แต่จริงๆ ไม่ได้รันอยู่เพราะ
-    webhook ถูกปิด และอีเมลของเจ้าของกล้อง (owner_email) แทนที่จะโชว์แค่ user id ดิบๆ
-    (join กับ users เพิ่ม — Camera.owner_user_id เป็น not-null เสมอ ใช้ inner join ได้)
 
-    ระบุ owner_user_id เพื่อกรองดูเฉพาะกล้องของ user คนเดียว (exact match) ได้ — ใช้ตอนกด
-    "ดูกล้องของ user นี้" จาก modal รายละเอียด user (GET /admin/users/{id})"""
     base_query = (
         select(models.Camera, models.WebhookEndpoint.is_active, models.User.email)
         .join(models.WebhookEndpoint, models.Camera.webhook_endpoint_id == models.WebhookEndpoint.id)
@@ -229,6 +227,8 @@ async def list_cameras(
     )
     if owner_user_id is not None:
         base_query = base_query.filter(models.Camera.owner_user_id == owner_user_id)
+    if owner_email:
+        base_query = base_query.filter(models.User.email.ilike(f"%{owner_email}%"))
     base_query = base_query.order_by(models.Camera.id.desc())
 
     count_query = select(func.count()).select_from(base_query.order_by(None).subquery())
@@ -264,19 +264,20 @@ async def list_users(
         default=None,
         description="กรองเฉพาะ user ที่มี ID ตรงกับค่านี้เท่านั้น (exact match) — ไม่ระบุ = ดูทั้งหมด",
     ),
+    email: Optional[str] = Query(
+        default=None,
+        description="กรองเฉพาะ user ที่อีเมลมีข้อความนี้อยู่ (partial, case-insensitive) — ไม่ระบุ = ดูทั้งหมด",
+    ),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    """ดูรายชื่อ user ทั้งหมดในระบบแบบแบ่งหน้า ใช้กับแท็บ Admin > ผู้ใช้งาน (ตาราง overview)
-    ระบุ user_id เพื่อกรองดูเฉพาะ user คนเดียว (exact match) ได้ (ค้นด้วย User ID เท่านั้น
-    ไม่รองรับค้นด้วยอีเมล/ค้นบางส่วนตามที่ตกลงไว้) — user_id เป็น UUID hex string แล้ว
 
-    รายละเอียดเจาะลึกรายคน (webhook_count/camera_count/suspended_reason) ยังคงต้องเรียก
-    GET /admin/users/{user_id} แยกต่างหาก (endpoint เดิม ไม่เปลี่ยน)"""
     query = select(models.User)
     if user_id is not None:
         query = query.filter(models.User.id == user_id)
+    if email:
+        query = query.filter(models.User.email.ilike(f"%{email}%"))
     query = query.order_by(models.User.id.desc())
     return await paginate(db, query, page_params)
 
@@ -376,6 +377,10 @@ async def set_user_suspend_status(
 @router.get("/webhooks", response_model=schemas.PaginatedResponse[schemas.WebhookAdminResponse])
 async def list_webhooks(
     user_id: Optional[str] = Query(default=None, description="กรองเฉพาะ webhook ของ user คนนี้"),
+    user_email: Optional[str] = Query(
+        default=None,
+        description="กรองเฉพาะ webhook ของเจ้าของที่อีเมลมีข้อความนี้อยู่ (partial, case-insensitive)",
+    ),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
@@ -387,6 +392,8 @@ async def list_webhooks(
     )
     if user_id is not None:
         base_query = base_query.filter(models.WebhookEndpoint.user_id == user_id)
+    if user_email:
+        base_query = base_query.filter(models.User.email.ilike(f"%{user_email}%"))
     base_query = base_query.order_by(models.WebhookEndpoint.id.desc())
 
     count_query = select(func.count()).select_from(base_query.order_by(None).subquery())
