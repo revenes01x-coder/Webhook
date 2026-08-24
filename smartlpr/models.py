@@ -1,12 +1,17 @@
+import uuid
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, JSON, UniqueConstraint
 from sqlalchemy.sql import func
 from smartlpr.database import Base
 
 
+def generate_uuid() -> str:
+    return uuid.uuid4().hex
+
+
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(String(32), primary_key=True, index=True, default=generate_uuid)
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
     is_verified = Column(Boolean, default=False, nullable=False)
@@ -29,7 +34,7 @@ class OtpVerification(Base):
     __table_args__ = (UniqueConstraint("user_id", "purpose", name="uq_otp_user_purpose"),)
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    user_id = Column(String(32), ForeignKey("users.id"), nullable=False, index=True)
     purpose = Column(String, nullable=False, default="register")  # register, password_reset
 
     otp_hash = Column(String, nullable=False)
@@ -45,7 +50,7 @@ class AccessRequest(Base):
     __tablename__ = "access_requests"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    user_id = Column(String(32), ForeignKey("users.id"), nullable=False, index=True)
 
     organization_name = Column(String, nullable=False)
     contact_email = Column(String, nullable=False)
@@ -55,7 +60,7 @@ class AccessRequest(Base):
 
     status = Column(String, default="pending", index=True)  # pending, approved, rejected
     admin_note = Column(Text, nullable=True)
-    reviewed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    reviewed_by = Column(String(32), ForeignKey("users.id"), nullable=True)
     reviewed_at = Column(DateTime(timezone=True), nullable=True)
 
     submitted_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -65,7 +70,7 @@ class Camera(Base):
     __tablename__ = "cameras"
 
     id = Column(String, primary_key=True, index=True)
-    owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    owner_user_id = Column(String(32), ForeignKey("users.id"), nullable=False, index=True)
     rtsp_url = Column(String, nullable=False, unique=True)
     webhook_endpoint_id = Column(Integer, ForeignKey("webhook_endpoints.id"), nullable=False, index=True)
     is_active = Column(Boolean, default=False, nullable=False)
@@ -89,7 +94,7 @@ class RateLimit(Base):
 class WebhookEndpoint(Base):
     __tablename__ = "webhook_endpoints"
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(String(32), ForeignKey("users.id"))
     url = Column(String, nullable=False, unique=True)
     is_active = Column(Boolean, default=True)
     disabled_reason = Column(Text, nullable=True)
@@ -102,7 +107,7 @@ class WebhookEvent(Base):
     __tablename__ = "webhook_events"
 
     id = Column(String, primary_key=True, index=True)  # composite: "{source_event_id}_{endpoint_id}"
-    user_id = Column(Integer, ForeignKey("users.id"))
+    user_id = Column(String(32), ForeignKey("users.id"))
 
     # event_id ต้นฉบับจากกล้อง (ไม่มี suffix endpoint) — ส่งออกไปใน payload จริง
     # เพื่อให้ target_url echo กลับมาให้ worker ใช้ verify ACK ได้
@@ -153,7 +158,7 @@ class RefreshToken(Base):
     __tablename__ = "refresh_tokens"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    user_id = Column(String(32), ForeignKey("users.id"), nullable=False, index=True)
     family_id = Column(String, nullable=False, index=True)
     token_hash = Column(String, nullable=False, unique=True, index=True)
 
@@ -165,9 +170,12 @@ class AdminAuditLog(Base):
     __tablename__ = "admin_audit_logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    admin_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    admin_id = Column(String(32), ForeignKey("users.id"), nullable=False, index=True)
     action = Column(String, nullable=False, index=True)        # เช่น "user.suspend", "webhook.disable"
     target_type = Column(String, nullable=False, index=True)   # "user" / "webhook_endpoint" / "access_request"
     target_id = Column(String, nullable=True, index=True)      # string ไว้เผื่อ target ในอนาคตเป็น id ที่ไม่ใช่ int (เช่น camera_id)
     detail = Column(JSON, nullable=True)                       # context เพิ่มเติม เช่น admin_note, url, email ของเป้าหมาย
+    # [IP Log]: IP ของ admin ตอนทำรายการ (routers/admin.py ส่ง request.client.host เข้ามา —
+    # ยังไม่รองรับ reverse proxy/X-Forwarded-For ดู services/audit_log.py) 45 ตัวรองรับ IPv6 เต็มรูปแบบ
+    ip_address = Column(String(45), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

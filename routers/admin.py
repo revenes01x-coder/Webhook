@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks, Request
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timezone
@@ -141,6 +141,7 @@ async def get_access_request_detail(
 async def review_access_request(
     request_id: int,
     payload: schemas.ReviewDecision,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
@@ -165,6 +166,8 @@ async def review_access_request(
 
     # [Audit Log]: บันทึกก่อน commit เสมอ ให้ commit เดียวกันครอบทั้ง action หลักและ log
     # การันตี atomicity — action สำเร็จ = ต้องมี log คู่กันเสมอ (ดู services/audit_log.py)
+    # [IP Log]: ส่ง IP ของ admin ที่ทำรายการไปด้วย (pattern เดียวกับ routers/auth.py:
+    # client_ip = request.client.host — ยังไม่รองรับ reverse proxy/X-Forwarded-For)
     log_admin_action(
         db, admin.id,
         action=f"access_request.{payload.decision}",
@@ -175,6 +178,7 @@ async def review_access_request(
             "requester_user_id": req.user_id,
             "admin_note": req.admin_note,
         },
+        ip_address=request.client.host,
     )
 
     await db.commit()
@@ -203,7 +207,7 @@ async def review_access_request(
 
 @router.get("/cameras", response_model=schemas.PaginatedResponse[schemas.CameraAdminResponse])
 async def list_cameras(
-    owner_user_id: Optional[int] = Query(
+    owner_user_id: Optional[str] = Query(
         default=None,
         description="กรองเฉพาะกล้องของเจ้าของ (owner_user_id) คนนี้เท่านั้น (exact match) — ไม่ระบุ = ดูทั้งหมด",
     ),
@@ -213,13 +217,15 @@ async def list_cameras(
 ):
     """ดูกล้องทั้งหมดในระบบ ไม่ว่าใครเป็นเจ้าของ พร้อมสถานะ webhook ปลายทางที่ผูกไว้
     (webhook_is_active) ให้เห็นได้เลยว่ากล้องไหน is_active=True แต่จริงๆ ไม่ได้รันอยู่เพราะ
-    webhook ถูกปิด
+    webhook ถูกปิด และอีเมลของเจ้าของกล้อง (owner_email) แทนที่จะโชว์แค่ user id ดิบๆ
+    (join กับ users เพิ่ม — Camera.owner_user_id เป็น not-null เสมอ ใช้ inner join ได้)
 
     ระบุ owner_user_id เพื่อกรองดูเฉพาะกล้องของ user คนเดียว (exact match) ได้ — ใช้ตอนกด
     "ดูกล้องของ user นี้" จาก modal รายละเอียด user (GET /admin/users/{id})"""
     base_query = (
-        select(models.Camera, models.WebhookEndpoint.is_active)
+        select(models.Camera, models.WebhookEndpoint.is_active, models.User.email)
         .join(models.WebhookEndpoint, models.Camera.webhook_endpoint_id == models.WebhookEndpoint.id)
+        .join(models.User, models.Camera.owner_user_id == models.User.id)
     )
     if owner_user_id is not None:
         base_query = base_query.filter(models.Camera.owner_user_id == owner_user_id)
@@ -241,9 +247,10 @@ async def list_cameras(
                 created_at=c.created_at,
                 rtsp_url=c.rtsp_url,
                 owner_user_id=c.owner_user_id,
+                owner_email=owner_email,
                 webhook_is_active=webhook_is_active,
             )
-            for c, webhook_is_active in rows
+            for c, webhook_is_active, owner_email in rows
         ],
         "total": total,
         "page": page_params.page,
@@ -253,7 +260,7 @@ async def list_cameras(
 
 @router.get("/users", response_model=schemas.PaginatedResponse[schemas.UserAdminResponse])
 async def list_users(
-    user_id: Optional[int] = Query(
+    user_id: Optional[str] = Query(
         default=None,
         description="กรองเฉพาะ user ที่มี ID ตรงกับค่านี้เท่านั้น (exact match) — ไม่ระบุ = ดูทั้งหมด",
     ),
@@ -263,7 +270,7 @@ async def list_users(
 ):
     """ดูรายชื่อ user ทั้งหมดในระบบแบบแบ่งหน้า ใช้กับแท็บ Admin > ผู้ใช้งาน (ตาราง overview)
     ระบุ user_id เพื่อกรองดูเฉพาะ user คนเดียว (exact match) ได้ (ค้นด้วย User ID เท่านั้น
-    ไม่รองรับค้นด้วยอีเมล/ค้นบางส่วนตามที่ตกลงไว้)
+    ไม่รองรับค้นด้วยอีเมล/ค้นบางส่วนตามที่ตกลงไว้) — user_id เป็น UUID hex string แล้ว
 
     รายละเอียดเจาะลึกรายคน (webhook_count/camera_count/suspended_reason) ยังคงต้องเรียก
     GET /admin/users/{user_id} แยกต่างหาก (endpoint เดิม ไม่เปลี่ยน)"""
@@ -276,7 +283,7 @@ async def list_users(
 
 @router.get("/users/{user_id}", response_model=schemas.UserAdminDetailResponse)
 async def get_user_detail(
-    user_id: int,
+    user_id: str,
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
@@ -319,8 +326,9 @@ async def get_user_detail(
 
 @router.patch("/users/{user_id}/suspend", response_model=schemas.UserAdminResponse)
 async def set_user_suspend_status(
-    user_id: int,
+    user_id: str,
     payload: schemas.UserSuspendUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
@@ -340,12 +348,14 @@ async def set_user_suspend_status(
     user.suspended_reason = payload.admin_note if payload.is_suspended else None
 
     # [Audit Log]: เหมือน review_access_request — บันทึกก่อน commit ให้อยู่ transaction เดียวกัน
+    # [IP Log]: ส่ง IP ของ admin ที่ทำรายการไปด้วย
     log_admin_action(
         db, admin.id,
         action="user.suspend" if payload.is_suspended else "user.unsuspend",
         target_type="user",
         target_id=user.id,
         detail={"user_email": user.email, "admin_note": user.suspended_reason},
+        ip_address=request.client.host,
     )
 
     await db.commit()
@@ -365,17 +375,47 @@ async def set_user_suspend_status(
 
 @router.get("/webhooks", response_model=schemas.PaginatedResponse[schemas.WebhookAdminResponse])
 async def list_webhooks(
-    user_id: Optional[int] = Query(default=None, description="กรองเฉพาะ webhook ของ user คนนี้"),
+    user_id: Optional[str] = Query(default=None, description="กรองเฉพาะ webhook ของ user คนนี้"),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    """ดู webhook endpoint ทั้งหมดในระบบ ไม่ว่าใครเป็นเจ้าของ"""
-    query = select(models.WebhookEndpoint)
+
+    base_query = (
+        select(models.WebhookEndpoint, models.User.email)
+        .outerjoin(models.User, models.WebhookEndpoint.user_id == models.User.id)
+    )
     if user_id is not None:
-        query = query.filter(models.WebhookEndpoint.user_id == user_id)
-    query = query.order_by(models.WebhookEndpoint.id.desc())
-    return await paginate(db, query, page_params)
+        base_query = base_query.filter(models.WebhookEndpoint.user_id == user_id)
+    base_query = base_query.order_by(models.WebhookEndpoint.id.desc())
+
+    count_query = select(func.count()).select_from(base_query.order_by(None).subquery())
+    total = (await db.execute(count_query)).scalar_one()
+
+    rows_result = await db.execute(base_query.offset(page_params.offset).limit(page_params.page_size))
+    rows = rows_result.all()
+    total_pages = (total + page_params.page_size - 1) // page_params.page_size if total else 0
+
+    return {
+        "items": [
+            schemas.WebhookAdminResponse(
+                id=w.id,
+                url=w.url,
+                is_active=w.is_active,
+                is_healthy=w.is_healthy,
+                consecutive_dead_letters=w.consecutive_dead_letters,
+                created_at=w.created_at,
+                user_id=w.user_id,
+                disabled_reason=w.disabled_reason,
+                owner_email=owner_email,
+            )
+            for w, owner_email in rows
+        ],
+        "total": total,
+        "page": page_params.page,
+        "page_size": page_params.page_size,
+        "total_pages": total_pages,
+    }
 
 
 @router.patch("/webhooks/{webhook_id}/status", response_model=schemas.WebhookAdminResponse)
@@ -383,6 +423,7 @@ async def set_webhook_status(
     webhook_id: int,
     payload: schemas.WebhookStatusUpdate,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
@@ -399,12 +440,14 @@ async def set_webhook_status(
     was_unhealthy = not endpoint.is_healthy
 
     # [Audit Log]: เหมือน 2 endpoint ด้านบน — บันทึกก่อน commit ให้อยู่ transaction เดียวกัน
+    # [IP Log]: ส่ง IP ของ admin ที่ทำรายการไปด้วย
     log_admin_action(
         db, admin.id,
         action="webhook.enable" if payload.is_active else "webhook.disable",
         target_type="webhook_endpoint",
         target_id=endpoint.id,
         detail={"url": endpoint.url, "admin_note": endpoint.disabled_reason},
+        ip_address=request.client.host,
     )
 
     await db.commit()
@@ -433,7 +476,7 @@ async def set_webhook_status(
 
 @router.get("/audit-log", response_model=schemas.PaginatedResponse[schemas.AdminAuditLogResponse])
 async def list_admin_audit_log(
-    admin_id: Optional[int] = Query(default=None, description="กรองเฉพาะรายการที่ทำโดย admin คนนี้ (exact match)"),
+    admin_id: Optional[str] = Query(default=None, description="กรองเฉพาะรายการที่ทำโดย admin คนนี้ (exact match)"),
     action: Optional[str] = Query(default=None, description="กรองตาม action เช่น 'user.suspend', 'webhook.disable' (exact match)"),
     target_type: Optional[str] = Query(default=None, description="กรองตามประเภทเป้าหมาย: user / webhook_endpoint / access_request"),
     target_id: Optional[str] = Query(default=None, description="กรองตาม target_id (exact match)"),
@@ -445,7 +488,8 @@ async def list_admin_audit_log(
     ในตารางนี้โดยเจตนา) ครอบคลุมการอนุมัติ/ปฏิเสธคำขอใช้งาน, ระงับ/ปลดระงับ user,
     เปิด/ปิด webhook endpoint — ดู services/audit_log.py และจุดที่เรียกใช้ในไฟล์นี้
 
-    join กับ users เพื่อโชว์อีเมลของ admin ที่ทำรายการแทนที่จะโชว์แค่ id เฉยๆ
+    join กับ users เพื่อโชว์อีเมลของ admin ที่ทำรายการแทนที่จะโชว์แค่ id เฉยๆ (admin_id เป็น
+    UUID hex string แล้ว) พร้อม ip_address ของ admin ตอนทำรายการ (บันทึกไว้ตั้งแต่ log_admin_action)
     ถูกลบทิ้งอัตโนมัติเป็นระยะตาม ADMIN_AUDIT_LOG_RETENTION_DAYS (ดู worker.py:cleanup_old_audit_logs)"""
     base_query = (
         select(models.AdminAuditLog, models.User.email)
@@ -480,6 +524,7 @@ async def list_admin_audit_log(
                 target_type=log.target_type,
                 target_id=log.target_id,
                 detail=log.detail,
+                ip_address=log.ip_address,
                 created_at=log.created_at,
             )
             for log, admin_email in rows

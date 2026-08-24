@@ -209,10 +209,13 @@ class WebhookResponse(BaseModel):
 
 
 class WebhookAdminResponse(WebhookResponse):
-    """สำหรับ admin เท่านั้น — เห็นเจ้าของ webhook (user_id) และเหตุผลที่ถูกปิด (ถ้ามี)
-    ใช้กับ GET /admin/webhooks และ PATCH /admin/webhooks/{id}/status"""
-    user_id: int
+    """สำหรับ admin เท่านั้น — เห็นเจ้าของ webhook (user_id + owner_email) และเหตุผลที่ถูกปิด
+    (ถ้ามี) ใช้กับ GET /admin/webhooks และ PATCH /admin/webhooks/{id}/status
+    user_id เป็น UUID hex string แล้ว (ตรงกับ User.id หลังเปลี่ยน PK) — nullable เพราะ
+    WebhookEndpoint.user_id เดิมไม่ได้บังคับ not-null ไว้ ดังนั้น owner_email ก็ไม่บังคับตาม"""
+    user_id: Optional[str] = None
     disabled_reason: Optional[str] = None
+    owner_email: Optional[str] = None
 
 
 class WebhookStatusUpdate(BaseModel):
@@ -353,9 +356,11 @@ class CameraResponse(BaseModel):
 
 
 class CameraAdminResponse(CameraResponse):
-    """สำหรับ admin เท่านั้น — เห็น rtsp_url และเจ้าของกล้องได้"""
+    """สำหรับ admin เท่านั้น — เห็น rtsp_url และเจ้าของกล้อง (owner_user_id + owner_email) ได้
+    owner_user_id เป็น UUID hex string แล้ว (ตรงกับ User.id หลังเปลี่ยน PK)"""
     rtsp_url: str
-    owner_user_id: int
+    owner_user_id: str
+    owner_email: str
     webhook_is_active: bool
 
 class MyCameraResponse(BaseModel):
@@ -442,7 +447,8 @@ class UserMeResponse(BaseModel):
 
 # ---- สำหรับ Admin: จัดการ user ----
 class UserAdminResponse(BaseModel):
-    id: int
+    # [UUID PK]: id ตอนนี้เป็น UUID hex string (ตรงกับ User.id หลังเปลี่ยน PK) ไม่ใช่ int แล้ว
+    id: str
     email: str
     is_verified: bool
     terms_accepted: bool
@@ -476,12 +482,16 @@ class UserSuspendUpdate(BaseModel):
 # ---- สำหรับ Admin Audit Log ----
 class AdminAuditLogResponse(BaseModel):
     id: int
-    admin_id: int
+    # [UUID PK]: admin_id เป็น UUID hex string แล้ว (ตรงกับ User.id หลังเปลี่ยน PK)
+    admin_id: str
     admin_email: str
     action: str
     target_type: str
     target_id: Optional[str] = None
     detail: Optional[dict] = None
+    # [IP Log]: IP ของ admin ตอนทำรายการ (มาจาก request.client.host ฝั่ง routers/admin.py —
+    # เป็น None ได้สำหรับ record เก่าก่อนเพิ่มฟีเจอร์นี้)
+    ip_address: Optional[str] = None
     created_at: datetime
 
 # ---- สำหรับ Admin Dashboard (GET /admin/dashboard) ----
