@@ -26,6 +26,81 @@ router = APIRouter(prefix="/admin", tags=["Admin"])
 _VALID_STATUSES = {"pending", "approved", "rejected"}
 _DEFAULT_REJECT_NOTE = "คำขอของคุณไม่ได้รับการอนุมัติในขณะนี้"
 
+@router.get("/dashboard", response_model=schemas.AdminDashboardResponse)
+async def get_admin_dashboard(
+    db: AsyncSession = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+    """
+    ภาพรวมระบบสำหรับหน้าแรกของโซน "ผู้ดูแลระบบ" — รวมตัวเลขสำคัญจากทุกโมดูลไว้ endpoint เดียว
+    กัน frontend ต้องยิงหลาย request แยกกัน (access-requests, cameras, webhooks ฯลฯ) ตอนโหลด
+    หน้าเดียว
+
+    [ทำไม sequential await ไม่ใช้ asyncio.gather]: AsyncSession ตัวเดียวกัน (db จาก
+    Depends(get_db)) ยิงหลาย query พร้อมกันแบบ concurrent ไม่ได้ (ไม่ coroutine-safe — เหตุผล
+    เดียวกับที่ worker.py:_notify_endpoints_tripped เคยแก้ half-async trap ไว้) endpoint นี้
+    เรียกไม่บ่อย (admin เข้ามาดูเป็นครั้งคราว ไม่ใช่ realtime polling) จึงไม่คุ้มไปพยายาม
+    optimize รวมเป็น query เดียวที่อ่านยากขึ้นแลกความเร็วที่แทบไม่ต่างกันในทางปฏิบัติ
+    """
+    users_total = (await db.execute(select(func.count(models.User.id)))).scalar_one()
+    users_verified = (await db.execute(
+        select(func.count(models.User.id)).filter(models.User.is_verified == True)  # noqa: E712
+    )).scalar_one()
+    users_suspended = (await db.execute(
+        select(func.count(models.User.id)).filter(models.User.is_suspended == True)  # noqa: E712
+    )).scalar_one()
+    pending_access_requests = (await db.execute(
+        select(func.count(models.AccessRequest.id)).filter(models.AccessRequest.status == "pending")
+    )).scalar_one()
+
+    cameras_total = (await db.execute(select(func.count(models.Camera.id)))).scalar_one()
+    cameras_active = (await db.execute(
+        select(func.count(models.Camera.id)).filter(models.Camera.is_active == True)  # noqa: E712
+    )).scalar_one()
+    cameras_pending_verification = (await db.execute(
+        select(func.count(models.Camera.id)).filter(
+            models.Camera.verification_status.in_(["pending", "failed"])
+        )
+    )).scalar_one()
+
+    webhooks_total = (await db.execute(select(func.count(models.WebhookEndpoint.id)))).scalar_one()
+    webhooks_active = (await db.execute(
+        select(func.count(models.WebhookEndpoint.id)).filter(models.WebhookEndpoint.is_active == True)  # noqa: E712
+    )).scalar_one()
+    webhooks_unhealthy = (await db.execute(
+        select(func.count(models.WebhookEndpoint.id)).filter(models.WebhookEndpoint.is_healthy == False)  # noqa: E712
+    )).scalar_one()
+
+    events_pending = (await db.execute(
+        select(func.count(models.WebhookEvent.id)).filter(
+            models.WebhookEvent.status.in_(["pending", "failed"]),
+            models.WebhookEvent.deleted_at.is_(None),
+        )
+    )).scalar_one()
+    events_dead_letter = (await db.execute(
+        select(func.count(models.WebhookEvent.id)).filter(
+            models.WebhookEvent.status == "dead_letter",
+            models.WebhookEvent.deleted_at.is_(None),
+        )
+    )).scalar_one()
+
+    return schemas.AdminDashboardResponse(
+        users=schemas.DashboardUserStats(
+            total=users_total, verified=users_verified,
+            suspended=users_suspended, pending_access_requests=pending_access_requests,
+        ),
+        cameras=schemas.DashboardCameraStats(
+            total=cameras_total, active=cameras_active,
+            pending_verification=cameras_pending_verification,
+        ),
+        webhooks=schemas.DashboardWebhookStats(
+            total=webhooks_total, active=webhooks_active, unhealthy=webhooks_unhealthy,
+        ),
+        events=schemas.DashboardEventQueueStats(
+            pending=events_pending, dead_letter=events_dead_letter,
+        ),
+    )
+
 @router.get("/access-requests", response_model=schemas.PaginatedResponse[schemas.AccessRequestResponse])
 async def list_access_requests(
     status_filter: Optional[str] = Query(

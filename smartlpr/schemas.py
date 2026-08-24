@@ -488,3 +488,34 @@ class AdminAuditLogResponse(BaseModel):
     target_id: Optional[str] = None
     detail: Optional[dict] = None
     created_at: datetime
+
+# ---- สำหรับ Admin Dashboard (GET /admin/dashboard) ----
+class DashboardUserStats(BaseModel):
+    total: int
+    verified: int
+    suspended: int
+    pending_access_requests: int
+
+
+class DashboardCameraStats(BaseModel):
+    total: int
+    active: int
+    pending_verification: int  # verification_status อยู่ใน (pending, failed)
+
+
+class DashboardWebhookStats(BaseModel):
+    total: int
+    active: int
+    unhealthy: int  # is_healthy=False (ถูกตัดไฟจาก circuit breaker)
+
+
+class DashboardEventQueueStats(BaseModel):
+    pending: int       # status อยู่ใน (pending, failed) และยังไม่ถูก soft-delete
+    dead_letter: int   # status = dead_letter และยังไม่ถูก soft-delete
+
+
+class AdminDashboardResponse(BaseModel):
+    users: DashboardUserStats
+    cameras: DashboardCameraStats
+    webhooks: DashboardWebhookStats
+    events: DashboardEventQueueStats
