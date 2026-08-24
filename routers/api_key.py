@@ -7,6 +7,7 @@ from smartlpr.database import get_db
 from smartlpr.security import get_current_user, require_access_approved
 from services.token import generate_api_key, hash_api_key
 from services.rate_limiter import check_and_record
+from services.audit_log import log_admin_action
 
 router = APIRouter(prefix="/my/api-key", tags=["API Key"])
 
@@ -30,6 +31,16 @@ async def regenerate_api_key(
 
     plain_key = generate_api_key()
     current_user.api_key_hash = hash_api_key(plain_key)
+
+    log_admin_action(
+        db, current_user.id,
+        action="api_key.regenerate",
+        target_type="user",
+        target_id=current_user.id,
+        detail={},
+        actor_type="user",
+    )
+
     await db.commit()
 
     return schemas.ApiKeyResponse(api_key=plain_key)

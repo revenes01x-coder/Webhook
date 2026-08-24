@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Response, Cookie
 from fastapi.security import OAuth2PasswordRequestForm
+from jose import jwt, JWTError
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +32,7 @@ from services.rate_limiter import (
 )
 from services.token import generate_otp, hash_otp, verify_otp, generate_refresh_token, hash_refresh_token
 from services.email_service import (send_otp_email, send_password_reset_otp_email,send_password_changed_email,)
+from services.audit_log import log_admin_action
 from smartlpr.config import (
     OTP_EXPIRE_MINUTES,
     OTP_MAX_ATTEMPTS,
@@ -38,6 +40,8 @@ from smartlpr.config import (
     OTP_RESEND_LIMIT_PER_HOUR,
     REFRESH_TOKEN_EXPIRE_DAYS,
     COOKIE_SECURE,
+    SECRET_KEY,
+    ALGORITHM,
 )
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -66,6 +70,26 @@ FORGOT_PASSWORD_IP_LOCKOUT_MINUTES = 15
 # current_password รัวๆ ใส่บัญชีที่ session หลุดมือไป
 CHANGE_PASSWORD_LOCKOUT_LIMIT = 5
 CHANGE_PASSWORD_LOCKOUT_MINUTES = 15
+
+
+async def _resolve_actor_id_for_logout(token: str, db: AsyncSession) -> str | None:
+    """ถอด access token แบบ soft-decode (ไม่ raise แม้ decode ไม่ผ่าน/หมดอายุไปแล้วพอดี) เพื่อหา
+    user.id มาบันทึกลง audit log เท่านั้น — ใช้เฉพาะใน logout() นี้ที่เดียว ต่างจาก
+    smartlpr.security.get_current_user ตรงที่ฟังก์ชันนั้น raise 401 ถ้า token ผิด/หมดอายุ (บังคับ
+    auth จริงจัง) แต่ logout ควรทำสำเร็จได้เสมอแม้ access token จะหมดอายุไปแล้วพอดีตอนกดออกจากระบบ
+    เลย "รู้ตัวถ้ารู้ได้ แต่ไม่บังคับต้องรู้" — คืน None ถ้าถอดไม่ได้/ไม่เจอ user แทนที่จะ error"""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+
+    email = payload.get("sub")
+    if not email:
+        return None
+
+    result = await db.execute(select(models.User).filter(models.User.email == email))
+    user = result.scalar_one_or_none()
+    return user.id if user else None
 
 
 async def _issue_refresh_token(db: AsyncSession, user: models.User, family_id: str | None = None) -> str:
@@ -302,6 +326,16 @@ async def verify_otp_endpoint(payload: schemas.OtpVerifyRequest, db: AsyncSessio
 
     user.is_verified = True
     await db.delete(otp_record)
+
+    log_admin_action(
+        db, user.id,
+        action="account.register_verified",
+        target_type="user",
+        target_id=user.id,
+        detail={"email": user.email},
+        actor_type="user",
+    )
+
     await db.commit()
 
     return {"message": "ยืนยันตัวตนสำเร็จ สามารถเข้าสู่ระบบได้แล้ว"}
@@ -389,6 +423,18 @@ async def login(
 
     # login สำเร็จ -> ล้างประวัติพลาดทิ้ง ไม่ต้องรอ window หมดอายุเอง
     await clear_lockout(db, lockout_key, "login_fail")
+
+    # [Audit Log]: เพิ่ม log ไว้ในนี้ก่อนออก token — จะถูก commit พร้อมกับ refresh token ที่ออก
+    # ใน _issue_refresh_token() ด้านล่าง (เรียก db.commit() อยู่แล้ว) ไม่ต้อง commit แยกเพิ่ม
+    log_admin_action(
+        db, user.id,
+        action="user.login",
+        target_type="user",
+        target_id=user.id,
+        detail={},
+        ip_address=client_ip,
+        actor_type="user",
+    )
 
     access_token = create_access_token(data={"sub": user.email})
 
@@ -599,6 +645,19 @@ async def reset_password(payload: schemas.ResetPasswordRequest, request: Request
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ไม่พบผู้ใช้นี้ในระบบ")
 
     user.hashed_password = get_password_hash(payload.new_password)
+
+    # [Audit Log]: flow "ลืมรหัสผ่าน" (ผ่าน OTP ไม่ต้อง login มาก่อน) — แยก action จาก
+    # password.change (flow login อยู่แล้วเปลี่ยนเฉยๆ) ให้ตรวจสอบย้อนหลังแยกกรณีได้ชัดเจน
+    log_admin_action(
+        db, user.id,
+        action="password.reset",
+        target_type="user",
+        target_id=user.id,
+        detail={},
+        ip_address=client_ip,
+        actor_type="user",
+    )
+
     await db.commit()
 
     await revoke_token(db, payload.reset_token)
@@ -636,6 +695,18 @@ async def change_password(
     await clear_lockout(db, lockout_key, "change_password")
 
     current_user.hashed_password = get_password_hash(payload.new_password)
+
+    # [Audit Log]: flow "login อยู่แล้ว เปลี่ยนรหัสผ่านเอง" — แยก action จาก password.reset
+    # (flow ลืมรหัสผ่านผ่าน OTP) ให้ตรวจสอบย้อนหลังแยกกรณีได้ชัดเจน
+    log_admin_action(
+        db, current_user.id,
+        action="password.change",
+        target_type="user",
+        target_id=current_user.id,
+        detail={},
+        actor_type="user",
+    )
+
     await db.commit()
 
     await revoke_token(db, token)
@@ -658,7 +729,13 @@ async def logout(
 ):
     """Revoke access token ปัจจุบัน (blacklist ทันทีผ่าน jti) + revoke refresh token ทั้ง family
     (ไม่ใช่แค่ใบที่ถืออยู่ กันใบเก่าที่เคย rotate ไปแล้วแต่ยังไม่หมดอายุหลุดรอด) แล้ว clear cookie
-    หลัง logout token ทั้งคู่ใช้ต่อไม่ได้อีกทันที แม้จะยังไม่หมดอายุตามปกติ"""
+    หลัง logout token ทั้งคู่ใช้ต่อไม่ได้อีกทันที แม้จะยังไม่หมดอายุตามปกติ
+
+    [Audit Log]: หา actor แบบ soft-decode (_resolve_actor_id_for_logout) ไม่บังคับ auth เต็มรูปแบบ
+    แบบ get_current_user — logout ควรสำเร็จได้เสมอแม้ access token จะหมดอายุไปแล้วพอดี ถ้าถอด
+    ไม่ได้ actor_id จะเป็น None (ยัง log ไว้เป็นหลักฐานว่ามี logout เกิดขึ้น แค่ไม่รู้ว่าใคร)"""
+    actor_id = await _resolve_actor_id_for_logout(token, db)
+
     await revoke_token(db, token)
 
     if refresh_token:
@@ -667,6 +744,16 @@ async def logout(
         record = result.scalar_one_or_none()
         if record:
             await _revoke_token_family(db, record.family_id)
+
+    log_admin_action(
+        db, actor_id,
+        action="user.logout",
+        target_type="user",
+        target_id=actor_id,
+        detail={},
+        actor_type="user",
+    )
+    await db.commit()
 
     _clear_refresh_cookie(response)
 

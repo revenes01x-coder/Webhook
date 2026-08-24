@@ -482,15 +482,13 @@ class UserSuspendUpdate(BaseModel):
 # ---- สำหรับ Admin Audit Log ----
 class AdminAuditLogResponse(BaseModel):
     id: int
-    # [UUID PK]: admin_id เป็น UUID hex string แล้ว (ตรงกับ User.id หลังเปลี่ยน PK)
-    admin_id: str
-    admin_email: str
+    actor_id: Optional[str] = None
+    actor_type: str  # "admin" / "user" / "system"
+    actor_email: Optional[str] = None
     action: str
     target_type: str
     target_id: Optional[str] = None
     detail: Optional[dict] = None
-    # [IP Log]: IP ของ admin ตอนทำรายการ (มาจาก request.client.host ฝั่ง routers/admin.py —
-    # เป็น None ได้สำหรับ record เก่าก่อนเพิ่มฟีเจอร์นี้)
     ip_address: Optional[str] = None
     created_at: datetime
 

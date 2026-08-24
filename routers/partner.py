@@ -10,6 +10,7 @@ from smartlpr.database import get_db
 from smartlpr.security import require_api_key
 from security.camera_url_guard import verify_camera_rtsp_url
 from services.rate_limiter import check_rate_limit
+from services.audit_log import log_admin_action
 
 router = APIRouter(prefix="/partner", tags=["Partner Integration"])
 
@@ -76,6 +77,15 @@ async def add_camera_from_partner(
         verification_status="pending",
     )
     db.add(new_camera)
+    
+    log_admin_action(
+        db, current_user.id,
+        action="camera.add",
+        target_type="camera",
+        target_id=new_camera.id,
+        detail={"webhook_endpoint_id": webhook.id},
+        actor_type="user",
+    )
 
     try:
         await db.commit()
@@ -135,6 +145,16 @@ async def update_camera_status_from_partner(
         )
 
     camera.is_active = payload.is_active
+
+    log_admin_action(
+        db, current_user.id,
+        action="camera.status_change",
+        target_type="camera",
+        target_id=camera.id,
+        detail={"is_active": payload.is_active},
+        actor_type="user",
+    )
+
     await db.commit()
 
     status_text = "เปิด" if payload.is_active else "ปิด"

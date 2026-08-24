@@ -8,6 +8,7 @@ from smartlpr.database import get_db
 from smartlpr.security import require_access_approved, get_current_user
 from security.ssrf_guard import verify_webhook_url
 from services.rate_limiter import check_rate_limit
+from services.audit_log import log_admin_action
 from smartlpr.pagination import PageParams, paginate
 
 router = APIRouter(prefix="/webhook", tags=["Webhook Management"])
@@ -42,9 +43,9 @@ async def add_webhook(
         is_active=True
     )
     db.add(new_endpoint)
-
+    
     try:
-        await db.commit()
+        await db.flush()
     except IntegrityError:
         await db.rollback()
         raise HTTPException(
@@ -52,6 +53,16 @@ async def add_webhook(
             detail="URL นี้ถูกใช้เป็น webhook ในระบบไปแล้ว กรุณาตรวจสอบรายการ webhook ของคุณ (GET /webhook/my) หรือใช้ URL อื่น",
         )
 
+    log_admin_action(
+        db, current_user.id,
+        action="webhook.add",
+        target_type="webhook_endpoint",
+        target_id=new_endpoint.id,
+        detail={"url": url_str},
+        actor_type="user",
+    )
+
+    await db.commit()
     await db.refresh(new_endpoint)
 
     return new_endpoint

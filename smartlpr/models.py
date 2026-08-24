@@ -166,16 +166,16 @@ class RefreshToken(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+
 class AdminAuditLog(Base):
     __tablename__ = "admin_audit_logs"
 
     id = Column(Integer, primary_key=True, index=True)
-    admin_id = Column(String(32), ForeignKey("users.id"), nullable=False, index=True)
-    action = Column(String, nullable=False, index=True)        # เช่น "user.suspend", "webhook.disable"
-    target_type = Column(String, nullable=False, index=True)   # "user" / "webhook_endpoint" / "access_request"
+    actor_id = Column(String(32), ForeignKey("users.id"), nullable=True, index=True)
+    actor_type = Column(String(10), nullable=False, default="admin", server_default="admin", index=True)
+    action = Column(String, nullable=False, index=True)
+    target_type = Column(String, nullable=False, index=True)   # "user" / "webhook_endpoint" / "access_request" / "camera"
     target_id = Column(String, nullable=True, index=True)      # string ไว้เผื่อ target ในอนาคตเป็น id ที่ไม่ใช่ int (เช่น camera_id)
     detail = Column(JSON, nullable=True)                       # context เพิ่มเติม เช่น admin_note, url, email ของเป้าหมาย
-    # [IP Log]: IP ของ admin ตอนทำรายการ (routers/admin.py ส่ง request.client.host เข้ามา —
-    # ยังไม่รองรับ reverse proxy/X-Forwarded-For ดู services/audit_log.py) 45 ตัวรองรับ IPv6 เต็มรูปแบบ
     ip_address = Column(String(45), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

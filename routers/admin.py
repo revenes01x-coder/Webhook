@@ -168,6 +168,7 @@ async def review_access_request(
     # การันตี atomicity — action สำเร็จ = ต้องมี log คู่กันเสมอ (ดู services/audit_log.py)
     # [IP Log]: ส่ง IP ของ admin ที่ทำรายการไปด้วย (pattern เดียวกับ routers/auth.py:
     # client_ip = request.client.host — ยังไม่รองรับ reverse proxy/X-Forwarded-For)
+    # actor_type ไม่ต้องระบุ — ดีฟอลต์ "admin" อยู่แล้ว (ดู services/audit_log.py)
     log_admin_action(
         db, admin.id,
         action=f"access_request.{payload.decision}",
@@ -483,27 +484,37 @@ async def set_webhook_status(
 
 @router.get("/audit-log", response_model=schemas.PaginatedResponse[schemas.AdminAuditLogResponse])
 async def list_admin_audit_log(
-    admin_id: Optional[str] = Query(default=None, description="กรองเฉพาะรายการที่ทำโดย admin คนนี้ (exact match)"),
+    actor_id: Optional[str] = Query(
+        default=None,
+        description=(
+            "กรองเฉพาะรายการที่ทำโดยผู้ใช้/แอดมินคนนี้ (exact match) — ไม่มีผลกับรายการที่ "
+            "actor_type='system' เพราะเป็น background job ไม่มี actor_id ผูกด้วย (เป็น None เสมอ)"
+        ),
+    ),
     action: Optional[str] = Query(default=None, description="กรองตาม action เช่น 'user.suspend', 'webhook.disable' (exact match)"),
-    target_type: Optional[str] = Query(default=None, description="กรองตามประเภทเป้าหมาย: user / webhook_endpoint / access_request"),
+    target_type: Optional[str] = Query(default=None, description="กรองตามประเภทเป้าหมาย: user / webhook_endpoint / access_request / camera"),
     target_id: Optional[str] = Query(default=None, description="กรองตาม target_id (exact match)"),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    """ประวัติการกระทำของ admin ทั้งหมดในระบบ (immutable — ไม่มี endpoint แก้ไข/ลบ record
-    ในตารางนี้โดยเจตนา) ครอบคลุมการอนุมัติ/ปฏิเสธคำขอใช้งาน, ระงับ/ปลดระงับ user,
-    เปิด/ปิด webhook endpoint — ดู services/audit_log.py และจุดที่เรียกใช้ในไฟล์นี้
+    """ประวัติการกระทำทั้งหมดในระบบ (immutable — ไม่มี endpoint แก้ไข/ลบ record ในตารางนี้โดย
+    เจตนา) ครอบคลุมทั้ง 3 ประเภทผู้ทำรายการ (ดู smartlpr/models.py: AdminAuditLog.actor_type):
+    admin (อนุมัติ/ปฏิเสธคำขอใช้งาน, ระงับ/ปลดระงับ user, เปิด/ปิด webhook endpoint), user
+    (login/logout, เพิ่ม webhook/กล้อง, เปลี่ยน/ตั้งรหัสผ่านใหม่ ฯลฯ) และ system (circuit
+    breaker ตัดไฟ/ฟื้น webhook อัตโนมัติ, ลบกล้องที่ยืนยัน RTSP ไม่ผ่านครบโควต้า)
 
-    join กับ users เพื่อโชว์อีเมลของ admin ที่ทำรายการแทนที่จะโชว์แค่ id เฉยๆ (admin_id เป็น
-    UUID hex string แล้ว) พร้อม ip_address ของ admin ตอนทำรายการ (บันทึกไว้ตั้งแต่ log_admin_action)
-    ถูกลบทิ้งอัตโนมัติเป็นระยะตาม ADMIN_AUDIT_LOG_RETENTION_DAYS (ดู worker.py:cleanup_old_audit_logs)"""
+    outerjoin กับ users (ไม่ใช่ join ธรรมดา) เพราะ actor_type="system" ไม่มี actor_id ผูกด้วยเลย
+    (เป็น NULL) — join ธรรมดาจะทำให้แถวพวกนี้หายไปจากผลลัพธ์ทั้งที่เป็น record ที่ถูกต้อง
+    พร้อม ip_address ของผู้ทำรายการตอนทำรายการ (บันทึกไว้ตั้งแต่ log_admin_action, เป็น None
+    เสมอสำหรับ actor_type="system") ถูกลบทิ้งอัตโนมัติเป็นระยะตาม ADMIN_AUDIT_LOG_RETENTION_DAYS
+    (ดู worker.py:cleanup_old_audit_logs)"""
     base_query = (
         select(models.AdminAuditLog, models.User.email)
-        .join(models.User, models.AdminAuditLog.admin_id == models.User.id)
+        .outerjoin(models.User, models.AdminAuditLog.actor_id == models.User.id)
     )
-    if admin_id is not None:
-        base_query = base_query.filter(models.AdminAuditLog.admin_id == admin_id)
+    if actor_id is not None:
+        base_query = base_query.filter(models.AdminAuditLog.actor_id == actor_id)
     if action:
         base_query = base_query.filter(models.AdminAuditLog.action == action)
     if target_type:
@@ -525,8 +536,9 @@ async def list_admin_audit_log(
         "items": [
             schemas.AdminAuditLogResponse(
                 id=log.id,
-                admin_id=log.admin_id,
-                admin_email=admin_email,
+                actor_id=log.actor_id,
+                actor_type=log.actor_type,
+                actor_email=actor_email,
                 action=log.action,
                 target_type=log.target_type,
                 target_id=log.target_id,
@@ -534,7 +546,7 @@ async def list_admin_audit_log(
                 ip_address=log.ip_address,
                 created_at=log.created_at,
             )
-            for log, admin_email in rows
+            for log, actor_email in rows
         ],
         "total": total,
         "page": page_params.page,
