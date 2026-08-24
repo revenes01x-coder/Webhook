@@ -292,16 +292,7 @@ class PartnerCameraCreate(BaseModel):
     เจ้าของบัญชี) เป็นคนกำหนด camera_id เอง (ใช้ตั้งค่าฝั่งอุปกรณ์กล้องจริงได้ล่วงหน้า)
     พร้อมระบุ webhook_url ที่จะผูกกล้องนี้ไว้ — ต้องเป็น URL ของ webhook ที่ user คนเดียวกัน
     (เจ้าของ API key) เคยสร้างไว้แล้วผ่าน POST /webhook/add เท่านั้น (กันข้อมูลกล้องหลุด
-    ไปเข้า webhook ของ "งาน"/สัญญาอื่นที่ user คนเดียวกันดูแลอยู่โดยไม่ได้ตั้งใจ)
-
-    [ONVIF Support]: partner เลือกระบุลิงก์กล้องได้ 2 ทาง (เลือกอย่างใดอย่างหนึ่งเท่านั้น):
-    - camera_url: ส่ง RTSP URL ตรงๆ แบบเดิม (partner รู้ path ของกล้องตัวเองอยู่แล้ว)
-    - onvif_ip + onvif_port + onvif_username + onvif_password: ให้ backend ไปเรียก ONVIF
-      Media Service (GetProfiles -> GetStreamUri) แทนเพื่อดึง RTSP URL มาเอง (ดู
-      security/onvif_client.py) เหมาะกับ partner ที่ไม่รู้ RTSP path ของกล้องตัวเอง
-    ห้ามส่งมาทั้งสองทางพร้อมกัน และห้ามไม่ส่งมาเลยทั้งคู่ (ดู exactly_one_connection_method
-    ด้านล่าง) — ไม่ว่าจะมาทางไหน สุดท้ายระบบจะ resolve ให้เหลือ RTSP URL เดียวเสมอ แล้วผ่าน
-    security/camera_url_guard.py:verify_camera_rtsp_url() ก่อนบันทึกทุกครั้ง"""
+    ไปเข้า webhook ของ "งาน"/สัญญาอื่นที่ user คนเดียวกันดูแลอยู่โดยไม่ได้ตั้งใจ)"""
     camera_id: str = Field(
         ...,
         min_length=1,
@@ -309,27 +300,11 @@ class PartnerCameraCreate(BaseModel):
         description="รหัสกล้องที่กำหนดเอง ใช้ตั้งค่าฝั่งอุปกรณ์กล้องจริงได้เลย ต้องไม่ซ้ำกับกล้องอื่นในระบบ",
         examples=["cam-front-gate-01"],
     )
-    camera_url: Optional[str] = Field(
-        default=None,
+    camera_url: str = Field(
+        ...,
         max_length=500,
-        description=(
-            "ทางที่ 1: ลิงก์ RTSP ของกล้องแบบตรงๆ ต้องขึ้นต้นด้วย rtsp:// เท่านั้น "
-            "ระบุอย่างใดอย่างหนึ่งระหว่างฟิลด์นี้กับชุด onvif_* เท่านั้น ห้ามระบุทั้งคู่"
-        ),
+        description="ลิงก์ RTSP ของกล้องแบบตรงๆ ต้องขึ้นต้นด้วย rtsp:// เท่านั้น",
     )
-    onvif_ip: Optional[str] = Field(
-        default=None,
-        max_length=255,
-        description="ทางที่ 2 (ผ่าน ONVIF): IP หรือ hostname ของกล้อง ใช้คู่กับ onvif_port/onvif_username/onvif_password",
-    )
-    onvif_port: Optional[int] = Field(
-        default=None,
-        ge=1,
-        le=65535,
-        description="พอร์ต ONVIF ของกล้อง (ปกติ 80 หรือ 8080 แล้วแต่ยี่ห้อ)",
-    )
-    onvif_username: Optional[str] = Field(default=None, max_length=100, description="username สำหรับยืนยันตัวตนกับ ONVIF service ของกล้อง")
-    onvif_password: Optional[str] = Field(default=None, max_length=200, description="password สำหรับยืนยันตัวตนกับ ONVIF service ของกล้อง")
     webhook_url: str = Field(
         ...,
         min_length=1,
@@ -349,23 +324,13 @@ class PartnerCameraCreate(BaseModel):
 
     @field_validator("camera_url")
     @classmethod
-    def validate_rtsp_scheme(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
+    def validate_rtsp_scheme(cls, v: str) -> str:
         v = v.strip()
         if not v:
-            return None  # ส่งมาเป็น string ว่าง/เว้นวรรค -> ถือว่าไม่ได้ระบุ (เหมือนไม่ส่งฟิลด์นี้มาเลย)
+            raise ValueError("จำเป็นต้องระบุลิงก์ RTSP (camera_url)")
         if not v.lower().startswith("rtsp://"):
             raise ValueError("ลิงก์กล้องไม่ถูกต้อง: ต้องขึ้นต้นด้วย rtsp:// เท่านั้น")
         return v
-
-    @field_validator("onvif_ip", "onvif_username", "onvif_password")
-    @classmethod
-    def strip_onvif_text_fields(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        v = v.strip()
-        return v or None  # ส่งมาเป็น string ว่าง -> ถือว่าไม่ได้ระบุเหมือนกัน
 
     @field_validator("webhook_url")
     @classmethod
@@ -374,28 +339,6 @@ class PartnerCameraCreate(BaseModel):
         if not v:
             raise ValueError("ห้ามเว้นว่าง")
         return v
-
-    @model_validator(mode="after")
-    def exactly_one_connection_method(self):
-        """บังคับว่าต้องเลือกมาแค่ทางเดียวระหว่าง camera_url (RTSP ตรงๆ) กับชุด onvif_*
-        (ONVIF) — ถ้าระบุ onvif_* มาไม่ครบทั้ง 4 ฟิลด์ ก็ถือว่าผิดเหมือนกัน (กันเคสกรอกมาครึ่งๆ
-        กลางๆ แล้วระบบไปเดาเอาเองว่าจะใช้ทางไหน)"""
-        has_rtsp = self.camera_url is not None
-        onvif_fields = [self.onvif_ip, self.onvif_port, self.onvif_username, self.onvif_password]
-        has_onvif = all(f is not None for f in onvif_fields)
-        has_onvif_partial = any(f is not None for f in onvif_fields) and not has_onvif
-
-        if has_onvif_partial:
-            raise ValueError(
-                "ระบุข้อมูล ONVIF ไม่ครบ ต้องมีทั้ง onvif_ip, onvif_port, onvif_username และ onvif_password"
-            )
-        if has_rtsp and has_onvif:
-            raise ValueError("ระบุได้แค่ทางเดียว: camera_url (RTSP ตรงๆ) หรือชุด onvif_* (ผ่าน ONVIF) ไม่ใช่ทั้งคู่")
-        if not has_rtsp and not has_onvif:
-            raise ValueError(
-                "ต้องระบุ camera_url (RTSP ตรงๆ) หรือชุด onvif_ip/onvif_port/onvif_username/onvif_password (ผ่าน ONVIF) อย่างใดอย่างหนึ่ง"
-            )
-        return self
 
 
 class CameraResponse(BaseModel):

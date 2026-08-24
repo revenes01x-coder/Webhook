@@ -9,8 +9,6 @@ import smartlpr.schemas as schemas
 from smartlpr.database import get_db
 from smartlpr.security import require_api_key
 from security.camera_url_guard import verify_camera_rtsp_url
-from security.ip_guard import SSRFBlockedError
-from security.onvif_client import resolve_onvif_stream_uri, OnvifResolutionError
 from services.rate_limiter import check_rate_limit
 
 router = APIRouter(prefix="/partner", tags=["Partner Integration"])
@@ -49,25 +47,15 @@ async def add_camera_from_partner(
             ),
         )
 
-    # [ONVIF Support]: schemas.PartnerCameraCreate บังคับแล้วว่าต้องมีมาแค่ทางเดียว (ดู
-    # exactly_one_connection_method) — ตรงนี้แค่แยกว่าจะ resolve rtsp_url ยังไงตามทางที่มา
-    if payload.camera_url:
-        rtsp_url = payload.camera_url
-    else:
-        try:
-            rtsp_url = await resolve_onvif_stream_uri(
-                payload.onvif_ip, payload.onvif_port, payload.onvif_username, payload.onvif_password
-            )
-        except SSRFBlockedError as e:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-        except OnvifResolutionError as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"เชื่อมต่อกล้องผ่าน ONVIF ไม่สำเร็จ: {e}",
-            )
+    if not payload.camera_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="จำเป็นต้องระบุลิงก์ RTSP (camera_url)",
+        )
+    
+    rtsp_url = payload.camera_url
 
-    # เช็ค rtsp_url ซ้ำ — ต้องทำหลัง resolve เสร็จแล้วเท่านั้น (ทาง ONVIF ยังไม่รู้ rtsp_url
-    # จริงจนกว่าจะ resolve เสร็จ เลยเช็คซ้ำก่อนหน้านี้ไม่ได้)
+    # เช็ค rtsp_url ซ้ำ ว่าถูกเพิ่มเข้าระบบไปแล้วหรือยัง
     existing_url_result = await db.execute(select(models.Camera).filter(models.Camera.rtsp_url == rtsp_url))
     existing_url = existing_url_result.scalar_one_or_none()
     if existing_url:
@@ -76,8 +64,7 @@ async def add_camera_from_partner(
             detail="ลิงก์กล้องไม่ถูกต้อง: ลิงก์นี้ถูกเพิ่มเข้าระบบไปแล้ว",
         )
 
-    # [SSRF Guard]: เช็คซ้ำเสมอไม่ว่า rtsp_url จะมาจากทางไหน — ทาง ONVIF ก็ต้องเช็คซ้ำเพราะ
-    # GetStreamUri ไม่ถูก nat_override rewrite ให้ (ดู docstring ใน security/onvif_client.py)
+    # [SSRF Guard]: ตรวจสอบความปลอดภัยของ RTSP url
     await asyncio.to_thread(verify_camera_rtsp_url, rtsp_url)
 
     new_camera = models.Camera(

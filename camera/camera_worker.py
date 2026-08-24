@@ -177,7 +177,7 @@ def read_plate(plate_crop, enhanced_gray, logger):
     text = text.replace('.', '').replace(',', '').replace('-', '').strip()
     parts = text.split(' ', 1)
     plate_part = fixformat(parts[0].strip())
-    province_part = ""
+    province_part = "unknown"
 
     if len(parts) > 1:
         corrected = autocorrect_province(parts[1].strip())
@@ -241,7 +241,8 @@ def save_capture(camera_id, frame, plate_crop, plate, province, color, save_dir_
     now = datetime.datetime.now()
     ts_file = now.strftime("%Y%m%d_%H%M%S")
     ts_display = now.strftime("%Y/%m/%d %H:%M:%S")
-    prov_str = f"_{province}" if province else ""
+    
+    prov_str = f"_{province}" if province and province != "unknown" else ""
 
     fname_full = f"{ts_file}_{plate}{prov_str}_full.jpg"
     path_full = os.path.join(save_dir_full, fname_full)
@@ -255,7 +256,6 @@ def save_capture(camera_id, frame, plate_crop, plate, province, color, save_dir_
     logger.info(f"เซฟรูป crop: {path_crop}")
 
     send_to_webhook(camera_id, path_full, path_crop, plate, province, color, ts_display, logger)
-
 
 def open_stream(url, logger):
     """เปิด RTSP stream ด้วย IP ที่ resolve + เช็คแล้วเท่านั้น (pin IP กัน DNS rebinding)
