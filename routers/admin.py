@@ -113,18 +113,27 @@ async def review_access_request(
 
 @router.get("/cameras", response_model=schemas.PaginatedResponse[schemas.CameraAdminResponse])
 async def list_cameras(
+    owner_user_id: Optional[int] = Query(
+        default=None,
+        description="กรองเฉพาะกล้องของเจ้าของ (owner_user_id) คนนี้เท่านั้น (exact match) — ไม่ระบุ = ดูทั้งหมด",
+    ),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
     """ดูกล้องทั้งหมดในระบบ ไม่ว่าใครเป็นเจ้าของ พร้อมสถานะ webhook ปลายทางที่ผูกไว้
     (webhook_is_active) ให้เห็นได้เลยว่ากล้องไหน is_active=True แต่จริงๆ ไม่ได้รันอยู่เพราะ
-    webhook ถูกปิด"""
+    webhook ถูกปิด
+
+    ระบุ owner_user_id เพื่อกรองดูเฉพาะกล้องของ user คนเดียว (exact match) ได้ — ใช้ตอนกด
+    "ดูกล้องของ user นี้" จาก modal รายละเอียด user (GET /admin/users/{id})"""
     base_query = (
         select(models.Camera, models.WebhookEndpoint.is_active)
         .join(models.WebhookEndpoint, models.Camera.webhook_endpoint_id == models.WebhookEndpoint.id)
-        .order_by(models.Camera.id.desc())
     )
+    if owner_user_id is not None:
+        base_query = base_query.filter(models.Camera.owner_user_id == owner_user_id)
+    base_query = base_query.order_by(models.Camera.id.desc())
 
     count_query = select(func.count()).select_from(base_query.order_by(None).subquery())
     total = (await db.execute(count_query)).scalar_one()
@@ -154,14 +163,24 @@ async def list_cameras(
 
 @router.get("/users", response_model=schemas.PaginatedResponse[schemas.UserAdminResponse])
 async def list_users(
+    user_id: Optional[int] = Query(
+        default=None,
+        description="กรองเฉพาะ user ที่มี ID ตรงกับค่านี้เท่านั้น (exact match) — ไม่ระบุ = ดูทั้งหมด",
+    ),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
     """ดูรายชื่อ user ทั้งหมดในระบบแบบแบ่งหน้า ใช้กับแท็บ Admin > ผู้ใช้งาน (ตาราง overview)
+    ระบุ user_id เพื่อกรองดูเฉพาะ user คนเดียว (exact match) ได้ (ค้นด้วย User ID เท่านั้น
+    ไม่รองรับค้นด้วยอีเมล/ค้นบางส่วนตามที่ตกลงไว้)
+
     รายละเอียดเจาะลึกรายคน (webhook_count/camera_count/suspended_reason) ยังคงต้องเรียก
     GET /admin/users/{user_id} แยกต่างหาก (endpoint เดิม ไม่เปลี่ยน)"""
-    query = select(models.User).order_by(models.User.id.desc())
+    query = select(models.User)
+    if user_id is not None:
+        query = query.filter(models.User.id == user_id)
+    query = query.order_by(models.User.id.desc())
     return await paginate(db, query, page_params)
 
 
