@@ -28,6 +28,8 @@ HEALTH_CHECK_TIMEOUT_SECONDS = 5
 CAMERA_VERIFY_TIMEOUT_SECONDS = 15
 CAMERA_VERIFY_MAX_ATTEMPTS = 5
 
+CAMERA_VERIFY_CONCURRENCY = 20
+
 
 def _is_valid_ack(event: models.WebhookEvent, response: httpx.Response) -> bool:
     """
@@ -478,14 +480,45 @@ def _try_open_rtsp(rtsp_url: str) -> bool:
             cap.release()
 
 
+async def _verify_one_camera_rtsp(camera: models.Camera) -> tuple[models.Camera, bool]:
+    """เช็ค RTSP กล้องตัวเดียว (ไม่แตะ DB เลย) — คืน (camera, is_ok) ให้ caller เอาไปอัปเดต DB
+    เองแบบ sequential ทีหลัง (AsyncSession ตัวเดียวกันเขียนพร้อมกันหลาย coroutine ไม่ได้ —
+    เหตุผลเดียวกับ comment เรื่อง half-async trap ใน _notify_endpoints_tripped ด้านบน)
+    ตัว timeout ยังเป็น per-camera เหมือนเดิม (CAMERA_VERIFY_TIMEOUT_SECONDS) — แค่หลายตัว
+    รันพร้อมกันได้แล้วผ่าน semaphore ของ caller (_verify_with_semaphore) แทนที่จะรอกันทีละตัว"""
+    try:
+        is_ok = await asyncio.wait_for(
+            asyncio.to_thread(_try_open_rtsp, camera.rtsp_url),
+            timeout=CAMERA_VERIFY_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        is_ok = False
+    return camera, is_ok
+
+
+async def _verify_with_semaphore(semaphore: asyncio.Semaphore, camera: models.Camera):
+    async with semaphore:
+        return await _verify_one_camera_rtsp(camera)
+
+
 async def verify_pending_cameras():
     """
     Background verification จังหวะที่ 2 (จังหวะที่ 1 คือ SSRF guard ตอน POST /partner/cameras)
     เช็คกล้องที่ verification_status อยู่ใน (pending, failed) และยังไม่ครบโควต้าการลอง
 
     ผ่าน -> is_active=True, verification_status='verified'
-    ไม่ผ่านแต่ยังไม่ครบโควต้า -> verification_status='failed' รอ job รอบหน้าลองใหม่ (ทุก 1 นาที)
+    ไม่ผ่านแต่ยังไม่ครบโควต้า -> verification_status='failed' รอ job รอบหน้าลองใหม่ (ทุก 30 วิ)
     ไม่ผ่านและครบโควต้าแล้ว -> [Bounded Retry] ลบ row ทิ้งเลย ไม่ค้างเป็น failed ตลอดไป
+
+    [Concurrency]: เช็ค RTSP ของแต่ละกล้องแบบขนานกัน (สูงสุด CAMERA_VERIFY_CONCURRENCY ตัว
+    พร้อมกัน ผ่าน asyncio.gather + Semaphore) แทนที่จะวน sequential ทีละตัวเหมือนเดิม — เดิม
+    กล้องที่มาทีหลังในคิวต้องรอกล้องก่อนหน้าเช็คเสร็จก่อน (worst case N ตัว ×
+    CAMERA_VERIFY_TIMEOUT_SECONDS วิ ต่อรอบ) พอ interval ของ job นี้ลดเหลือ 30 วิ แค่ 2-3 กล้อง
+    pending พร้อมกันก็ทำให้รอบเดียวเกิน interval แล้ว การเช็คขนานทำให้เวลารวมของรอบเหลือแค่
+    ceil(N / CAMERA_VERIFY_CONCURRENCY) × timeout เท่านั้น (ตัวใครตัวมัน ไม่ต้องรอกัน) —
+    ส่วนขั้นอัปเดต DB (verify_attempt_count, verification_status, ลบกล้องที่เกินโควต้า ฯลฯ)
+    ยังต้องทำ sequential เหมือนเดิมหลัง gather เสร็จ เพราะ session เดียวกันเขียนพร้อมกันไม่ได้
+    (แต่ส่วนนี้เร็ว ไม่มี I/O รอกล้องจริง จึงไม่ใช่คอขวด)
     """
     db: AsyncSession = SessionLocal()
     try:
@@ -500,15 +533,12 @@ async def verify_pending_cameras():
         if not cameras_to_check:
             return
 
-        for camera in cameras_to_check:
-            try:
-                is_ok = await asyncio.wait_for(
-                    asyncio.to_thread(_try_open_rtsp, camera.rtsp_url),
-                    timeout=CAMERA_VERIFY_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                is_ok = False
+        semaphore = asyncio.Semaphore(CAMERA_VERIFY_CONCURRENCY)
+        results = await asyncio.gather(
+            *(_verify_with_semaphore(semaphore, camera) for camera in cameras_to_check)
+        )
 
+        for camera, is_ok in results:
             camera.verify_attempt_count += 1
 
             if is_ok:
@@ -698,7 +728,7 @@ def start_scheduler():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(process_webhook_queue, 'interval', seconds=30)
     scheduler.add_job(process_graveyard_resume, 'interval', minutes=30)
-    scheduler.add_job(verify_pending_cameras, 'interval', minutes=1)
+    scheduler.add_job(verify_pending_cameras, 'interval', seconds=30)
     scheduler.add_job(cleanup_unverified_users, 'interval', hours=1)
     scheduler.add_job(cleanup_old_plate_data, 'interval', hours=24)
     scheduler.add_job(cleanup_expired_revoked_tokens, 'interval', hours=1)

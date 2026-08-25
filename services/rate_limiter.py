@@ -18,9 +18,11 @@ async def check_rate_limit(db: AsyncSession, key: str, action: str, limit: int, 
     if rate_record:
         if now < rate_record.expire_at:
             if rate_record.count >= limit:
+                retry_after_seconds = max(1, int((rate_record.expire_at - now).total_seconds()))
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail=f"จำกัดการใช้งาน: คุณทำรายการ {action} บ่อยเกินไป กรุณารอสักครู่"
+                    detail=f"จำกัดการใช้งาน: คุณทำรายการ {action} บ่อยเกินไป กรุณารอสักครู่",
+                    headers={"Retry-After": str(retry_after_seconds)},
                 )
             rate_record.count += 1
         else:
@@ -40,8 +42,7 @@ async def check_rate_limit(db: AsyncSession, key: str, action: str, limit: int, 
     try:
         await db.commit()
     except IntegrityError:
-        # แพ้ race — อีก request คู่ขนานเพิ่ง insert (key, action) นี้ไปพอดีก่อนหน้าเราเสี้ยววินาที
-        # rollback แล้วเรียกตัวเองซ้ำ รอบนี้จะเข้า branch "มี record แล้ว" ด้านบนแทน
+
         await db.rollback()
         await check_rate_limit(db, key, action, limit=limit, window_minutes=window_minutes)
 
@@ -56,7 +57,7 @@ async def check_lockout(db: AsyncSession, key: str, action: str, limit: int, win
 
     if record and now < record.expire_at and record.count >= limit:
         remaining_seconds = int((record.expire_at - now).total_seconds())
-        remaining_minutes = max(1, (remaining_seconds + 59) // 60)  # ปัดขึ้น อย่างน้อย 1 นาที (ใช้แค่ในข้อความ)
+        remaining_minutes = max(1, (remaining_seconds + 59) // 60)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={
@@ -66,6 +67,7 @@ async def check_lockout(db: AsyncSession, key: str, action: str, limit: int, win
                 ),
                 "retry_after_seconds": max(1, remaining_seconds),
             },
+            headers={"Retry-After": str(max(1, remaining_seconds))},
         )
 
 

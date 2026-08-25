@@ -1,5 +1,6 @@
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException, status
+import hashlib
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Header
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
@@ -21,8 +22,7 @@ async def add_camera_from_partner(
     current_user: models.User = Depends(require_api_key),
 ):
 
-    # [Rate Limit]: เพิ่มกล้องได้ 5 ตัว / ชั่วโมง / user (กันสแปม/API key หลุดแล้วโดนยิงรัว)
-    await check_rate_limit(db, f"partner_add_camera_{current_user.id}", "partner_add_camera", limit=5, window_minutes=60)
+    await check_rate_limit(db, f"partner_add_camera_{current_user.id}", "partner_add_camera", limit=20, window_minutes=60)
 
     existing_id_result = await db.execute(select(models.Camera).filter(models.Camera.id == payload.camera_id))
     existing_id = existing_id_result.scalar_one_or_none()
@@ -160,13 +160,24 @@ async def update_camera_status_from_partner(
     status_text = "เปิด" if payload.is_active else "ปิด"
     return {"message": f"{status_text}ใช้งานกล้อง '{camera.id}' เรียบร้อยแล้ว"}
 
+def _compute_camera_etag(camera_id: str, verification_status: str, is_active: bool) -> str:
+    """Weak ETag จาก field ที่มีความหมายจริงต่อ partner (verification_status + is_active)
+    ไม่ใช่ hash ของ response body ทั้งก้อน — เปลี่ยนแค่ 2 field นี้เท่านั้นถึงจะได้ ETag ใหม่"""
+    raw = f"{camera_id}:{verification_status}:{is_active}"
+    digest = hashlib.sha256(raw.encode()).hexdigest()[:16]
+    return f'W/"{digest}"'
+
+
 @router.get("/cameras/{camera_id}", response_model=schemas.PartnerCameraStatusResponse)
 async def get_camera_verification_status(
     camera_id: str,
+    response: Response,
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(require_api_key),
+    if_none_match: str | None = Header(default=None, alias="If-None-Match"),
 ):
-    await check_rate_limit(db, f"camera_status_check_{current_user.id}", "camera_status_check", limit=60, window_minutes=60)
+
+    await check_rate_limit(db, f"camera_status_check_{current_user.id}", "camera_status_check", limit=2400, window_minutes=60)
 
     result = await db.execute(
         select(models.Camera).filter(
@@ -184,6 +195,12 @@ async def get_camera_verification_status(
                 "แล้วลองสร้างใหม่อีกครั้ง"
             ),
         )
+
+    etag = _compute_camera_etag(camera.id, camera.verification_status, camera.is_active)
+    response.headers["ETag"] = etag
+
+    if if_none_match and if_none_match == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})
 
     return schemas.PartnerCameraStatusResponse(
         camera_id=camera.id,
