@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from smartlpr import models
 from smartlpr.database import SessionLocal
 from services.email_service import send_webhook_endpoint_unhealthy_email
+from services.audit_log import log_admin_action
 from smartlpr.config import (UNVERIFIED_USER_EXPIRE_HOURS, PLATE_DATA_RETENTION_DAYS, OTP_RETENTION_DAYS, ADMIN_AUDIT_LOG_RETENTION_DAYS)
 from security.ssrf_guard import build_pinned_request, build_test_webhook_payload
 from security.camera_url_guard import resolve_rtsp_url_pinned
@@ -189,19 +190,23 @@ def _apply_send_result(event, endpoint, result_type, error_msg):
     return just_tripped_endpoint
 
 
-async def _notify_endpoints_tripped(db: AsyncSession, tripped_endpoints: dict) -> None:
-    """ส่งอีเมลแจ้ง user ว่า endpoint ของตัวเองถูกตัดไฟ — เรียกหลัง db.commit() แล้วเท่านั้น
-    ไม่ให้ endpoint เดียวกันถูกแจ้งซ้ำในรอบเดียวกัน (tripped_endpoints คีย์ด้วย endpoint.id อยู่แล้ว)
-    ส่งเมลพังไม่กระทบ transaction หลัก (แค่ log error ทิ้ง)
+def _log_endpoints_tripped(db: AsyncSession, tripped_endpoints: dict) -> None:
 
-    [Async Migration - แก้ half-async trap เดิม]: เดิมฟังก์ชันนี้เป็น sync แล้วถูกเรียกทั้งก้อน
-    ผ่าน `asyncio.to_thread(_notify_endpoints_tripped, db, tripped_endpoints)` — ใช้ได้กับ sync
-    Session เดิม แต่ตอนนี้ db เป็น AsyncSession แล้ว การส่ง AsyncSession ตัวเดียวกันข้าม thread
-    ไปใช้งานแบบนั้นไม่ปลอดภัย (AsyncSession ผูกกับ event loop เดียว ไม่ thread-safe) จึงเปลี่ยน
-    ฟังก์ชันนี้เป็น async โดยตรง (query DB ด้วย await บน event loop หลักตามปกติ) แล้วห่อเฉพาะ
-    ส่วนที่ยังเป็น blocking I/O จริง (สมทลิบ/SMTP ผ่าน send_webhook_endpoint_unhealthy_email)
-    ด้วย asyncio.to_thread ทีละอีเมลแทน — แยก "DB async" ออกจาก "SMTP sync-in-thread" ให้ชัดเจน
-    """
+    for endpoint in tripped_endpoints.values():
+        log_admin_action(
+            db, None,
+            action="webhook.auto_disable",
+            target_type="webhook_endpoint",
+            target_id=endpoint.id,
+            detail={
+                "url": endpoint.url,
+                "consecutive_dead_letters": endpoint.consecutive_dead_letters,
+            },
+            actor_type="system",
+        )
+
+
+async def _notify_endpoints_tripped(db: AsyncSession, tripped_endpoints: dict) -> None:
     for endpoint in tripped_endpoints.values():
         result = await db.execute(select(models.User).filter(models.User.id == endpoint.user_id))
         owner = result.scalar_one_or_none()
@@ -282,6 +287,9 @@ async def process_webhook_queue():
                 if just_tripped:
                     tripped_endpoints[just_tripped.id] = just_tripped
 
+        if tripped_endpoints:
+            _log_endpoints_tripped(db, tripped_endpoints)
+
         await db.commit()
 
         if to_send and tripped_endpoints:
@@ -352,6 +360,16 @@ async def process_graveyard_resume(endpoint_ids: list[int] | None = None):
                     endpoint.consecutive_dead_letters = 0
                     recovered_endpoints.append(endpoint)
 
+            for endpoint in recovered_endpoints:
+                log_admin_action(
+                    db, None,
+                    action="webhook.auto_recover",
+                    target_type="webhook_endpoint",
+                    target_id=endpoint.id,
+                    detail={"url": endpoint.url},
+                    actor_type="system",
+                )
+
             # เปิดไฟให้ endpoint ที่ฟื้นก่อน commit ทันที แม้ resume ด้านล่างจะพังก็ไม่เสีย progress ตรงนี้
             await db.commit()
 
@@ -408,6 +426,9 @@ async def process_graveyard_resume(endpoint_ids: list[int] | None = None):
                 if endpoint:
                     if _mark_endpoint_outcome(endpoint, success=False):
                         tripped_endpoints[endpoint.id] = endpoint
+
+        if tripped_endpoints:
+            _log_endpoints_tripped(db, tripped_endpoints)
 
         await db.commit()
 
@@ -499,6 +520,18 @@ async def verify_pending_cameras():
                 logging.warning(
                     f"[Camera Verify] camera id={camera.id} เชื่อมต่อ RTSP ไม่สำเร็จครบ "
                     f"{CAMERA_VERIFY_MAX_ATTEMPTS} ครั้ง -> ลบออกจากระบบ (partner ต้องสร้างใหม่เอง)"
+                )
+
+                log_admin_action(
+                    db, None,
+                    action="camera.auto_delete",
+                    target_type="camera",
+                    target_id=camera.id,
+                    detail={
+                        "owner_user_id": camera.owner_user_id,
+                        "verify_attempt_count": camera.verify_attempt_count,
+                    },
+                    actor_type="system",
                 )
                 await db.delete(camera)
 

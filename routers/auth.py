@@ -271,7 +271,11 @@ async def register_user(user: schemas.UserCreate, request: Request, db: AsyncSes
 
 
 @router.post("/verify-otp")
-async def verify_otp_endpoint(payload: schemas.OtpVerifyRequest, db: AsyncSession = Depends(get_db)):
+async def verify_otp_endpoint(
+    payload: schemas.OtpVerifyRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(select(models.User).filter(models.User.email == payload.email))
     user = result.scalar_one_or_none()
     if not user:
@@ -327,12 +331,16 @@ async def verify_otp_endpoint(payload: schemas.OtpVerifyRequest, db: AsyncSessio
     user.is_verified = True
     await db.delete(otp_record)
 
+    # [IP Log]: เพิ่ม request.client.host เข้า ip_address — เดิมฟังก์ชันนี้ไม่มีพารามิเตอร์
+    # request เลย เพราะเช็คไม่ผ่านตอน endpoint นี้ถูกสร้างครั้งแรก (ยังไม่มี audit log ตอนนั้น)
+    # ทำให้ account.register_verified โชว์ IP เป็น "-" เสมอ (ไม่ใช่ตั้งใจซ่อน แค่ไม่เคยส่งมาให้)
     log_admin_action(
         db, user.id,
         action="account.register_verified",
         target_type="user",
         target_id=user.id,
         detail={"email": user.email},
+        ip_address=request.client.host,
         actor_type="user",
     )
 
@@ -675,6 +683,7 @@ async def reset_password(payload: schemas.ResetPasswordRequest, request: Request
 @router.post("/change-password")
 async def change_password(
     payload: schemas.ChangePasswordRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     token: str = Depends(oauth2_scheme),
     current_user: models.User = Depends(get_current_user),
@@ -698,12 +707,16 @@ async def change_password(
 
     # [Audit Log]: flow "login อยู่แล้ว เปลี่ยนรหัสผ่านเอง" — แยก action จาก password.reset
     # (flow ลืมรหัสผ่านผ่าน OTP) ให้ตรวจสอบย้อนหลังแยกกรณีได้ชัดเจน
+    # [IP Log]: เดิมฟังก์ชันนี้ไม่มีพารามิเตอร์ request เลย ทำให้ log ไม่มี ip_address ติดไปด้วย
+    # (เหมือนเคส verify-otp/logout ที่เจอ) เพิ่ม request เข้ามาและส่ง ip_address ให้ครบเหมือน
+    # password.reset ที่เป็น flow คู่กัน
     log_admin_action(
         db, current_user.id,
         action="password.change",
         target_type="user",
         target_id=current_user.id,
         detail={},
+        ip_address=request.client.host,
         actor_type="user",
     )
 
@@ -722,18 +735,13 @@ async def change_password(
 
 @router.post("/logout")
 async def logout(
+    request: Request,
     response: Response,
     token: str = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),
     refresh_token: str | None = Cookie(default=None, alias=REFRESH_TOKEN_COOKIE_NAME),
 ):
-    """Revoke access token ปัจจุบัน (blacklist ทันทีผ่าน jti) + revoke refresh token ทั้ง family
-    (ไม่ใช่แค่ใบที่ถืออยู่ กันใบเก่าที่เคย rotate ไปแล้วแต่ยังไม่หมดอายุหลุดรอด) แล้ว clear cookie
-    หลัง logout token ทั้งคู่ใช้ต่อไม่ได้อีกทันที แม้จะยังไม่หมดอายุตามปกติ
 
-    [Audit Log]: หา actor แบบ soft-decode (_resolve_actor_id_for_logout) ไม่บังคับ auth เต็มรูปแบบ
-    แบบ get_current_user — logout ควรสำเร็จได้เสมอแม้ access token จะหมดอายุไปแล้วพอดี ถ้าถอด
-    ไม่ได้ actor_id จะเป็น None (ยัง log ไว้เป็นหลักฐานว่ามี logout เกิดขึ้น แค่ไม่รู้ว่าใคร)"""
     actor_id = await _resolve_actor_id_for_logout(token, db)
 
     await revoke_token(db, token)
@@ -751,6 +759,7 @@ async def logout(
         target_type="user",
         target_id=actor_id,
         detail={},
+        ip_address=request.client.host,
         actor_type="user",
     )
     await db.commit()
