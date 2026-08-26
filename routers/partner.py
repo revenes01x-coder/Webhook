@@ -1,6 +1,6 @@
 import asyncio
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
@@ -228,18 +228,17 @@ async def delete_camera_from_partner(
         .filter(models.WebhookEvent.camera_id == camera.id)
     )).scalar_one()
 
-    # ลบ WebhookEvent ทุกแถวที่ผูกกับกล้องนี้ก่อน (ทุก status) กัน FK constraint ตอนลบ Camera
-    # ต่อไป — ไม่แตะไฟล์ full_image_path/crop_image_path บน disk เลย (เจตนาเก็บไว้)
-    await db.execute(
-        delete(models.WebhookEvent).where(models.WebhookEvent.camera_id == camera.id)
-    )
+    if event_count:
+        await db.execute(
+            update(models.WebhookEvent)
+            .where(models.WebhookEvent.camera_id == camera.id)
+            .values(camera_id=None)
+        )
 
     rtsp_url = camera.rtsp_url
     webhook_endpoint_id = camera.webhook_endpoint_id
-    await db.delete(camera)
+    await db.delete(camera)  # Camera row หายจริง -> camera_id/rtsp_url นี้ reuse สร้างใหม่ได้ทันที
 
-    # [Audit Log]: เพราะ record หลักหายไปหมดแล้ว log นี้คือร่องรอยเดียวที่เหลือ — ใส่ path
-    # รูปไว้ให้ครบ เผื่อต้องสืบย้อนหลังทีหลัง
     log_admin_action(
         db, current_user.id,
         action="camera.delete",
@@ -248,7 +247,7 @@ async def delete_camera_from_partner(
         detail={
             "rtsp_url": rtsp_url,
             "webhook_endpoint_id": webhook_endpoint_id,
-            "deleted_event_count": event_count,
+            "orphaned_event_count": event_count,  # เดิมชื่อ deleted_event_count — event ไม่ได้ถูกลบแล้ว แค่ตัด FK
             "captures_dir": f"captures/camera_{camera_id}",  # ไฟล์รูปยังอยู่ตรงนี้ ไม่ถูกลบ
         },
         actor_type="user",
@@ -258,8 +257,8 @@ async def delete_camera_from_partner(
 
     return {
         "message": (
-            f"ลบกล้อง '{camera_id}' และข้อมูล event ที่เกี่ยวข้องทั้งหมด "
-            f"({event_count} รายการ) ออกจากระบบเรียบร้อยแล้ว camera_id/rtsp_url นี้ "
-            "สามารถนำไปใช้สร้างกล้องใหม่ได้"
+            f"ลบกล้อง '{camera_id}' ออกจากระบบเรียบร้อยแล้ว ข้อมูล event ที่เคยบันทึกไว้ "
+            f"({event_count} รายการ) จะยังคงอยู่ในระบบตามระยะเวลาเก็บข้อมูลปกติ (ไม่ผูกกับกล้องนี้อีกต่อไป) "
+            "camera_id/rtsp_url นี้สามารถนำไปใช้สร้างกล้องใหม่ได้ทันที"
         )
     }
