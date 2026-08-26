@@ -12,8 +12,8 @@ from services.audit_log import log_admin_action
 router = APIRouter(prefix="/my/api-key", tags=["API Key"])
 
 # [Lockout ใหม่]: ตกลงกันไว้ = 3 ครั้ง / ล็อก 5 นาที ต่อ user
-REGEN_API_KEY_LOCKOUT_LIMIT = 3
-REGEN_API_KEY_LOCKOUT_MINUTES = 5
+REGEN_API_KEY_LOCKOUT_LIMIT = 1
+REGEN_API_KEY_LOCKOUT_MINUTES = 60
 
 
 @router.post("/regenerate", response_model=schemas.ApiKeyResponse)
