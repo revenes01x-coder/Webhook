@@ -1,7 +1,6 @@
 import asyncio
-import hashlib
-from fastapi import APIRouter, Depends, HTTPException, status, Response, Header
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
@@ -122,6 +121,11 @@ async def update_camera_status_from_partner(
     current_user: models.User = Depends(require_api_key),
 ):
 
+    await check_rate_limit(
+        db, f"partner_camera_status_{current_user.id}", "partner_camera_status",
+        limit=300, window_minutes=60,
+    )
+
     result = await db.execute(
         select(models.Camera).filter(
             models.Camera.id == payload.camera_id,
@@ -160,21 +164,12 @@ async def update_camera_status_from_partner(
     status_text = "เปิด" if payload.is_active else "ปิด"
     return {"message": f"{status_text}ใช้งานกล้อง '{camera.id}' เรียบร้อยแล้ว"}
 
-def _compute_camera_etag(camera_id: str, verification_status: str, is_active: bool) -> str:
-    """Weak ETag จาก field ที่มีความหมายจริงต่อ partner (verification_status + is_active)
-    ไม่ใช่ hash ของ response body ทั้งก้อน — เปลี่ยนแค่ 2 field นี้เท่านั้นถึงจะได้ ETag ใหม่"""
-    raw = f"{camera_id}:{verification_status}:{is_active}"
-    digest = hashlib.sha256(raw.encode()).hexdigest()[:16]
-    return f'W/"{digest}"'
-
 
 @router.get("/cameras/{camera_id}", response_model=schemas.PartnerCameraStatusResponse)
 async def get_camera_verification_status(
     camera_id: str,
-    response: Response,
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(require_api_key),
-    if_none_match: str | None = Header(default=None, alias="If-None-Match"),
 ):
 
     await check_rate_limit(db, f"camera_status_check_{current_user.id}", "camera_status_check", limit=2400, window_minutes=60)
@@ -196,14 +191,75 @@ async def get_camera_verification_status(
             ),
         )
 
-    etag = _compute_camera_etag(camera.id, camera.verification_status, camera.is_active)
-    response.headers["ETag"] = etag
-
-    if if_none_match and if_none_match == etag:
-        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})
-
     return schemas.PartnerCameraStatusResponse(
         camera_id=camera.id,
         verification_status=camera.verification_status,
         is_active=camera.is_active,
     )
+
+@router.delete("/cameras/{camera_id}")
+async def delete_camera_from_partner(
+    camera_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(require_api_key),
+):
+
+    await check_rate_limit(
+        db, f"partner_delete_camera_{current_user.id}", "partner_delete_camera",
+        limit=20, window_minutes=60,
+    )
+
+    result = await db.execute(
+        select(models.Camera).filter(
+            models.Camera.id == camera_id,
+            models.Camera.owner_user_id == current_user.id,
+        )
+    )
+    camera = result.scalar_one_or_none()
+    if not camera:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"ไม่พบกล้อง camera_id='{camera_id}' ในบัญชีของคุณ",
+        )
+
+    # นับก่อนลบ เอาไว้บันทึกลง audit log (หลังลบไปแล้วนับไม่ได้อีก)
+    event_count = (await db.execute(
+        select(func.count()).select_from(models.WebhookEvent)
+        .filter(models.WebhookEvent.camera_id == camera.id)
+    )).scalar_one()
+
+    # ลบ WebhookEvent ทุกแถวที่ผูกกับกล้องนี้ก่อน (ทุก status) กัน FK constraint ตอนลบ Camera
+    # ต่อไป — ไม่แตะไฟล์ full_image_path/crop_image_path บน disk เลย (เจตนาเก็บไว้)
+    await db.execute(
+        delete(models.WebhookEvent).where(models.WebhookEvent.camera_id == camera.id)
+    )
+
+    rtsp_url = camera.rtsp_url
+    webhook_endpoint_id = camera.webhook_endpoint_id
+    await db.delete(camera)
+
+    # [Audit Log]: เพราะ record หลักหายไปหมดแล้ว log นี้คือร่องรอยเดียวที่เหลือ — ใส่ path
+    # รูปไว้ให้ครบ เผื่อต้องสืบย้อนหลังทีหลัง
+    log_admin_action(
+        db, current_user.id,
+        action="camera.delete",
+        target_type="camera",
+        target_id=camera_id,
+        detail={
+            "rtsp_url": rtsp_url,
+            "webhook_endpoint_id": webhook_endpoint_id,
+            "deleted_event_count": event_count,
+            "captures_dir": f"captures/camera_{camera_id}",  # ไฟล์รูปยังอยู่ตรงนี้ ไม่ถูกลบ
+        },
+        actor_type="user",
+    )
+
+    await db.commit()
+
+    return {
+        "message": (
+            f"ลบกล้อง '{camera_id}' และข้อมูล event ที่เกี่ยวข้องทั้งหมด "
+            f"({event_count} รายการ) ออกจากระบบเรียบร้อยแล้ว camera_id/rtsp_url นี้ "
+            "สามารถนำไปใช้สร้างกล้องใหม่ได้"
+        )
+    }
