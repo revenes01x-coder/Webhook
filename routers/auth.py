@@ -783,27 +783,3 @@ def get_me(current_user: models.User = Depends(get_current_user)):
         created_at=current_user.created_at,
     )
 
-
-@router.patch("/me", response_model=schemas.UserMeResponse)
-async def update_me(
-    payload: schemas.ProfileUpdateRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    current_user.full_name = payload.full_name
-    current_user.phone = payload.phone
-    await db.commit()
-    await db.refresh(current_user)
-
-    return schemas.UserMeResponse(
-        email=current_user.email,
-        is_verified=current_user.is_verified,
-        terms_accepted=current_user.terms_accepted,
-        is_admin=current_user.is_admin,
-        has_api_key=current_user.api_key_hash is not None,
-        is_suspended=current_user.is_suspended,
-        suspended_reason=current_user.suspended_reason,
-        full_name=current_user.full_name,
-        phone=current_user.phone,
-        created_at=current_user.created_at,
-    )

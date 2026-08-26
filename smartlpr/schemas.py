@@ -407,26 +407,6 @@ class ApiKeyStatusResponse(BaseModel):
     has_api_key: bool
 
 
-# ---- สำหรับหน้า "โปรไฟล์ของฉัน" — แก้ไขชื่อ-เบอร์โทรติดต่อของบัญชีตัวเอง ----
-PROFILE_FULL_NAME_MAX = 200
-PROFILE_PHONE_MAX = 30
-
-
-class ProfileUpdateRequest(BaseModel):
-    """ใช้กับ PATCH /auth/me — เขียนทับ full_name/phone ตามค่าที่ส่งมาเสมอทั้งคู่ (ไม่ใช่ partial
-    patch แบบ merge ทีละฟิลด์) ส่งเป็นค่าว่าง/ไม่ระบุ = ล้างค่าเดิมทิ้ง ตรงกับพฤติกรรมฟอร์มฝั่ง
-    frontend ที่ส่งค่าปัจจุบันของทั้งฟอร์มมาเสมอทุกครั้งที่กดบันทึก"""
-    full_name: Optional[str] = Field(default=None, max_length=PROFILE_FULL_NAME_MAX)
-    phone: Optional[str] = Field(default=None, max_length=PROFILE_PHONE_MAX)
-
-    @field_validator("full_name", "phone")
-    @classmethod
-    def strip_optional(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        v = v.strip()
-        return v or None  # พิมพ์แต่ space -> ถือว่าไม่ได้ระบุ/ล้างค่าทิ้ง
-
 
 # ---- สำหรับ GET /auth/me — เช็คสถานะ user แบบ read-only (terms/admin/api-key/suspend) ----
 class UserMeResponse(BaseModel):
