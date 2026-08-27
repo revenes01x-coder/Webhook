@@ -143,7 +143,7 @@ async def _revoke_token_family(db: AsyncSession, family_id: str) -> None:
     await db.commit()
 
 
-async def _revoke_all_sessions(db: AsyncSession, user_id: int) -> None:
+async def _revoke_all_sessions(db: AsyncSession, user_id: str) -> None:
     """Revoke refresh token ทุก family ที่ยังไม่ถูก revoke ของ user คนนี้ — ใช้ร่วมกันทั้ง
     reset_password (ผ่าน OTP ตอนลืมรหัสผ่าน) และ change_password (login อยู่แล้ว เปลี่ยนเฉยๆ)
     บังคับให้ทุกอุปกรณ์ที่เคย login ไว้ต้อง login ใหม่หลังรหัสผ่านเปลี่ยน — กันเคส token เก่าหลุด
@@ -746,12 +746,16 @@ async def logout(
 
     await revoke_token(db, token)
 
-    if refresh_token:
+    user_id = actor_id
+    if not user_id and refresh_token:
         token_hash = hash_refresh_token(refresh_token)
         result = await db.execute(select(models.RefreshToken).filter(models.RefreshToken.token_hash == token_hash))
         record = result.scalar_one_or_none()
         if record:
-            await _revoke_token_family(db, record.family_id)
+            user_id = record.user_id
+
+    if user_id:
+        await _revoke_all_sessions(db, user_id)
 
     log_admin_action(
         db, actor_id,
@@ -766,7 +770,7 @@ async def logout(
 
     _clear_refresh_cookie(response)
 
-    return {"message": "ออกจากระบบเรียบร้อยแล้ว"}
+    return {"message": "ออกจากระบบทุกอุปกรณ์เรียบร้อยแล้ว"}
 
 @router.get("/me", response_model=schemas.UserMeResponse)
 def get_me(current_user: models.User = Depends(get_current_user)):
