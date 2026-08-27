@@ -74,6 +74,7 @@ def _validate_password_rules(v: str) -> str:
 
 # ---- สำหรับการสมัครสมาชิกและเข้าสู่ระบบ ----
 class UserCreate(BaseModel):
+    full_name: str = Field(..., min_length=1, max_length=200, description="ชื่อ")
     email: EmailStr
     password: str = Field(
         ...,
@@ -91,6 +92,14 @@ class UserCreate(BaseModel):
         description="กรอกรหัสผ่านซ้ำอีกครั้งเพื่อยืนยัน ต้องตรงกับ password",
     )
 
+    @field_validator("full_name")
+    @classmethod
+    def strip_full_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("กรุณากรอกชื่อ")
+        return v
+    
     @field_validator("email")
     @classmethod
     def validate_email(cls, v: str) -> str:
@@ -109,6 +118,19 @@ class UserCreate(BaseModel):
             raise ValueError("รหัสผ่านและรหัสผ่านยืนยันไม่ตรงกัน")
         return self
 
+class UserProfileUpdate(BaseModel):
+    """ใช้กับ PATCH /auth/me — user แก้ไขชื่อของตัวเองเท่านั้น
+    เบอร์โทร/ช่องทางติดต่ออื่นๆ จัดการผ่าน /my/contacts (routers/my_contacts.py) แยกต่างหาก
+    ไม่ปนกับ field นี้ — กันมี 2 ที่ให้แก้ "เบอร์โทร" ที่ซ้อนทับกันแบบงงๆ"""
+    full_name: str = Field(..., min_length=1, max_length=200)
+
+    @field_validator("full_name")
+    @classmethod
+    def strip_full_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("กรุณากรอกชื่อ")
+        return v
 
 class Token(BaseModel):
     access_token: str
@@ -501,15 +523,14 @@ class UserContactResponse(BaseModel):
 
 # ---- สำหรับ Admin: จัดการ user ----
 class UserAdminResponse(BaseModel):
-    # [UUID PK]: id ตอนนี้เป็น UUID hex string (ตรงกับ User.id หลังเปลี่ยน PK) ไม่ใช่ int แล้ว
     id: str
     email: str
+    full_name: Optional[str] = None
     is_verified: bool
     terms_accepted: bool
     is_admin: bool
     is_suspended: bool
     created_at: datetime
-
     class Config:
         from_attributes = True
 

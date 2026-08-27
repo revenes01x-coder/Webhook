@@ -242,10 +242,11 @@ async def register_user(user: schemas.UserCreate, request: Request, db: AsyncSes
                 )
 
         db_user.hashed_password = hashed_password
+        db_user.full_name = user.full_name
         await db.commit()
         new_user = db_user
     else:
-        new_user = models.User(email=user.email, hashed_password=hashed_password, is_verified=False)
+        new_user = models.User(email=user.email, hashed_password=hashed_password, full_name=user.full_name,  is_verified=False)
         db.add(new_user)
 
         try:
@@ -787,3 +788,30 @@ def get_me(current_user: models.User = Depends(get_current_user)):
         created_at=current_user.created_at,
     )
 
+@router.patch("/me", response_model=schemas.UserMeResponse)
+async def update_me(
+    payload: schemas.UserProfileUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    updates = payload.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ไม่มีข้อมูลที่จะแก้ไข")
+
+    for field, value in updates.items():
+        setattr(current_user, field, value)
+
+    log_admin_action(
+        db, current_user.id,
+        action="profile.update",
+        target_type="user",
+        target_id=current_user.id,
+        detail=updates,
+        ip_address=request.client.host,
+        actor_type="user",
+    )
+
+    await db.commit()
+    await db.refresh(current_user)
+    return current_user
