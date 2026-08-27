@@ -461,7 +461,6 @@ class UserMeResponse(BaseModel):
 class UserContactCreate(BaseModel):
     channel_type: str = Field(..., description=f"ต้องเป็นหนึ่งใน {sorted(_USER_CONTACT_CHANNEL_TYPES)}")
     value: str = Field(..., min_length=1, max_length=300)
-    link: Optional[str] = Field(default=None, max_length=2048, description="ไม่บังคับ — ลิงก์ที่กดแล้วเปิดได้")
 
     @field_validator("channel_type")
     @classmethod
@@ -471,14 +470,6 @@ class UserContactCreate(BaseModel):
             raise ValueError(f"channel_type ต้องเป็นหนึ่งใน {sorted(_USER_CONTACT_CHANNEL_TYPES)}")
         return v
 
-    @field_validator("link")
-    @classmethod
-    def strip_link(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        v = v.strip()
-        return v or None  # ถ้าพิมพ์แต่ space ให้ถือว่าไม่ได้ใส่ลิงก์
-
     @model_validator(mode="after")
     def normalize_value(self):
         self.value = normalize_user_contact_value(self.channel_type, self.value)
@@ -487,7 +478,6 @@ class UserContactCreate(BaseModel):
 
 class UserContactUpdate(BaseModel):
     value: str = Field(..., min_length=1, max_length=300)
-    link: Optional[str] = Field(default=None, max_length=2048)
 
     @field_validator("value")
     @classmethod
@@ -497,20 +487,11 @@ class UserContactUpdate(BaseModel):
             raise ValueError("ห้ามเว้นว่าง")
         return v
 
-    @field_validator("link")
-    @classmethod
-    def strip_link(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        v = v.strip()
-        return v or None
-
 
 class UserContactResponse(BaseModel):
     id: int
     channel_type: str
     value: str
-    link: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 
@@ -603,7 +584,6 @@ class ContactChannelResponse(BaseModel):
     id: int
     label: str
     value: str
-    link: Optional[str] = None
     icon: str
     display_order: int
 
@@ -614,7 +594,6 @@ class ContactChannelResponse(BaseModel):
 class ContactChannelCreate(BaseModel):
     label: str = Field(..., min_length=1, max_length=100)
     value: str = Field(..., min_length=1, max_length=300)
-    link: Optional[str] = Field(default=None, max_length=2048)
     icon: str = Field(default="generic")
 
     @field_validator("label", "value")
@@ -624,14 +603,6 @@ class ContactChannelCreate(BaseModel):
         if not v:
             raise ValueError("ห้ามเว้นว่าง")
         return v
-
-    @field_validator("link")
-    @classmethod
-    def strip_link(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        v = v.strip()
-        return v or None  # ถ้าพิมพ์แต่ space ให้ถือว่าไม่ได้ใส่ลิงก์
 
     @field_validator("icon")
     @classmethod
@@ -643,11 +614,9 @@ class ContactChannelCreate(BaseModel):
 
 
 class ContactChannelUpdate(BaseModel):
-    """PATCH แบบ partial — ฟิลด์ที่ไม่ส่งมาจะไม่ถูกแตะ (ดู routers/contact.py: exclude_unset=True)
-    ส่ง link=null ตรงๆ ได้ ถ้าต้องการล้างลิงก์ทิ้งให้เหลือข้อความล้วน"""
+    """PATCH แบบ partial — ฟิลด์ที่ไม่ส่งมาจะไม่ถูกแตะ (ดู routers/contact.py: exclude_unset=True)"""
     label: Optional[str] = Field(default=None, min_length=1, max_length=100)
     value: Optional[str] = Field(default=None, min_length=1, max_length=300)
-    link: Optional[str] = Field(default=None, max_length=2048)
     icon: Optional[str] = None
 
     @field_validator("label", "value")
@@ -659,14 +628,6 @@ class ContactChannelUpdate(BaseModel):
         if not v:
             raise ValueError("ห้ามเว้นว่าง")
         return v
-
-    @field_validator("link")
-    @classmethod
-    def strip_link(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        v = v.strip()
-        return v or None
 
     @field_validator("icon")
     @classmethod

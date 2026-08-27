@@ -36,15 +36,15 @@ async def _seed_contact_channels() -> None:
         db.add_all([
             models.ContactChannel(
                 label="LINE Official Account", value="sp0803650401",
-                link="https://line.me/ti/p/~sp0803650401", icon="line", display_order=1,
+                icon="line", display_order=1,
             ),
             models.ContactChannel(
                 label="อีเมล", value="saphonxch@gmail.com",
-                link="mailto:saphonxch@gmail.com", icon="email", display_order=2,
+                icon="email", display_order=2,
             ),
             models.ContactChannel(
                 label="เวลาทำการ", value="จันทร์–ศุกร์ 09:00–18:00 น.",
-                link=None, icon="clock", display_order=3,
+                icon="clock", display_order=3,
             ),
         ])
         await db.commit()

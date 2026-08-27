@@ -76,7 +76,6 @@ async def add_my_contact(
         user_id=current_user.id,
         channel_type=payload.channel_type,
         value=payload.value,  # ผ่าน normalize_user_contact_value() ใน schema แล้ว (ดู model_validator)
-        link=payload.link,
     )
     db.add(new_contact)
 
@@ -113,7 +112,7 @@ async def update_my_contact(
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """แก้ไข value/link ของข้อมูลติดต่อที่มีอยู่แล้วเท่านั้น (channel_type แก้ไม่ได้ — ต้องลบแล้ว
+    """แก้ไข value ของข้อมูลติดต่อที่มีอยู่แล้วเท่านั้น (channel_type แก้ไม่ได้ — ต้องลบแล้ว
     เพิ่มใหม่ถ้าอยากเปลี่ยนประเภท) ใช้กฎ normalize/validate ตัวเดียวกับตอนสร้าง (เบอร์โทรต้องเป็น
     มือถือไทย 10 หลัก, อีเมลต้องมีรูปแบบถูกต้อง ฯลฯ) เพราะ UserContactUpdate ไม่มี channel_type
     ให้ pydantic validate เองตอน parse body (ต้องรู้ channel_type ของ record เดิมก่อน)"""
@@ -125,7 +124,6 @@ async def update_my_contact(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     contact.value = normalized_value
-    contact.link = payload.link
 
     log_admin_action(
         db, current_user.id,

@@ -49,7 +49,6 @@ async def create_contact_channel(
     new_channel = models.ContactChannel(
         label=payload.label,
         value=payload.value,
-        link=payload.link,
         icon=payload.icon,
         display_order=(max_order or 0) + 1,
     )
@@ -77,7 +76,7 @@ async def update_contact_channel(
     admin: models.User = Depends(require_admin),
 ):
     """แก้ไขบางฟิลด์ (partial update) — ฟิลด์ที่ไม่ได้ส่งมาใน body จะไม่ถูกแตะเลย
-    (exclude_unset=True) ต่างจากส่ง link=null ตรงๆ ซึ่งหมายถึง "ล้างลิงก์ทิ้ง ให้เหลือข้อความล้วน\""""
+    (exclude_unset=True)"""
     channel = await _get_channel_or_404(db, channel_id)
 
     updates = payload.model_dump(exclude_unset=True)

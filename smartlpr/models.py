@@ -187,7 +187,6 @@ class ContactChannel(Base):
     id = Column(Integer, primary_key=True, index=True)
     label = Column(String, nullable=False)   # หัวข้อสั้นๆ เช่น "LINE Official Account", "อีเมล", "เวลาทำการ"
     value = Column(String, nullable=False)   # ข้อความที่แสดงผล/คัดลอกได้ เช่น "sp0803650401"
-    link = Column(String, nullable=True)     # URL เมื่อกด เช่น https://line.me/... หรือ mailto:... — None = ข้อความล้วน ไม่มีลิงก์ให้กด
     icon = Column(String, nullable=False, default="generic")  # ใช้เลือกไอคอนฝั่ง frontend: line, email, phone, clock, generic
     display_order = Column(Integer, nullable=False, default=0, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -208,7 +207,6 @@ class UserContact(Base):
     user_id = Column(String(32), ForeignKey("users.id"), nullable=False, index=True)
     channel_type = Column(String(20), nullable=False)
     value = Column(String(300), nullable=False)
-    link = Column(String(2048), nullable=True)  # ไม่บังคับ — URL ที่กดแล้วเปิดได้ เช่นลิงก์โปรไฟล์ FB
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
