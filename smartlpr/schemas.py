@@ -21,6 +21,7 @@ _USER_CONTACT_CHANNEL_TYPES = {
 # เบอร์มือถือไทย 10 หลัก ขึ้นต้นด้วย 06/08/09 เท่านั้น (ไม่รองรับเบอร์บ้าน/ต่างประเทศ — ตกลงกันไว้
 # ให้ง่ายและบังคับรูปแบบชัดเจน) เช็คกับตัวเลขล้วนหลังตัด - หรือช่องว่างออกแล้วเท่านั้น
 _THAI_MOBILE_RE = re.compile(r"^0[689]\d{8}$")
+_CONTACT_VALUE_MIN_LENGTH = 4
 
 
 def normalize_user_contact_value(channel_type: str, value: str) -> str:
@@ -35,12 +36,13 @@ def normalize_user_contact_value(channel_type: str, value: str) -> str:
         return digits
 
     if channel_type == "email":
-        # เช็คคร่าวๆ พอ (ไม่ใช้ EmailStr ตรงๆ เพราะ field นี้เป็น value กลางที่ใช้ร่วมกับ
-        # channel_type อื่นด้วย) ความเข้มงวดระดับ EmailStr ไม่จำเป็นสำหรับข้อมูลติดต่อเสริมแบบนี้
         local_part, _, domain_part = value.partition("@")
         if not local_part or "." not in domain_part or domain_part.startswith(".") or domain_part.endswith("."):
             raise ValueError("รูปแบบอีเมลไม่ถูกต้อง")
         return value
+
+    if len(value) < _CONTACT_VALUE_MIN_LENGTH:
+        raise ValueError(f"ต้องมีความยาวอย่างน้อย {_CONTACT_VALUE_MIN_LENGTH} ตัวอักษร")
 
     return value
 
