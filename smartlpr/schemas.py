@@ -12,8 +12,6 @@ PASSWORD_MIN_LENGTH = 8
 
 PASSWORD_INPUT_MAX_CHARS = 256
 
-_CONTACT_CHANNEL_ICONS = {"line", "email", "phone", "clock", "generic", "facebook"}
-
 # ---- User Contact (ข้อมูลติดต่อส่วนตัวของ user เอง — ดู smartlpr/models.py:UserContact) ----
 _USER_CONTACT_CHANNEL_TYPES = {
     "facebook", "line", "phone", "email", "instagram", "whatsapp", "tiktok", "generic",
@@ -47,7 +45,32 @@ def normalize_user_contact_value(channel_type: str, value: str) -> str:
     return value
 
 
+# [Cleanup] เดิมไฟล์นี้ประกาศ _CONTACT_CHANNEL_ICONS ซ้ำ 2 รอบ (ตัวแรกอยู่บนสุดของไฟล์ ตัวที่สอง
+# อยู่ตรงนี้) ค่าเหมือนกันทุกตัวอักษรและไม่มีการอ้างอิง _CONTACT_CHANNEL_ICONS เลยระหว่างสองจุดนี้
+# ตัวแรกจึงเป็นโค้ดที่ตายแล้ว (ถูกตัวนี้ shadow ทับก่อนมีใครใช้งาน) — ลบตัวแรกทิ้ง เหลือประกาศเดียวที่นี่
 _CONTACT_CHANNEL_ICONS = {"line", "email", "phone", "clock", "generic", "facebook"}
+
+# ---- Username (มาตรฐาน: unique ทั้งระบบ, ไม่ใช้ login แทนอีเมล — ดู smartlpr/models.py:User) ----
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+USERNAME_MIN_LENGTH = 3
+USERNAME_MAX_LENGTH = 32
+
+
+def normalize_username(v: str) -> str:
+    v = v.strip()
+    if len(v) < USERNAME_MIN_LENGTH or len(v) > USERNAME_MAX_LENGTH:
+        raise ValueError(f"username ต้องมีความยาว {USERNAME_MIN_LENGTH}-{USERNAME_MAX_LENGTH} ตัวอักษร")
+    if not _USERNAME_RE.match(v):
+        raise ValueError(
+            "username ใช้ได้เฉพาะตัวอักษรภาษาอังกฤษ (a-z, A-Z), ตัวเลข (0-9) "
+            "และสัญลักษณ์ _ . - เท่านั้น (ห้ามเว้นวรรคหรืออักขระพิเศษอื่น)"
+        )
+    if v[0] in "_.-" or v[-1] in "_.-":
+        raise ValueError("username ห้ามขึ้นต้นหรือลงท้ายด้วย _ . -")
+    # เก็บเป็นตัวพิมพ์เล็กเสมอ (แบบเดียวกับ email) กัน "John" กับ "john" ไม่ถือว่าซ้ำกันทั้งที่
+    # คนอ่านมองว่าเป็นชื่อเดียวกัน — แลกกับการไม่รักษา case ตามที่ผู้ใช้พิมพ์มาต้นฉบับ
+    return v.lower()
+
 
 def _validate_password_rules(v: str) -> str:
     v = v.strip()
@@ -75,6 +98,18 @@ def _validate_password_rules(v: str) -> str:
 # ---- สำหรับการสมัครสมาชิกและเข้าสู่ระบบ ----
 class UserCreate(BaseModel):
     full_name: str = Field(..., min_length=1, max_length=200, description="ชื่อ")
+    # [Username]: บังคับกรอกตอนสมัคร ไม่ซ้ำใครในระบบ — login ยังใช้อีเมลเหมือนเดิม (username ไม่ใช่
+    # ช่องทาง login) ดู normalize_username() ด้านบนสำหรับกฎอักขระ/ความยาวแบบเต็ม
+    username: str = Field(
+        ...,
+        min_length=USERNAME_MIN_LENGTH,
+        max_length=USERNAME_MAX_LENGTH,
+        description=(
+            f"username ต้องไม่ซ้ำกับผู้ใช้อื่น ความยาว {USERNAME_MIN_LENGTH}-{USERNAME_MAX_LENGTH} "
+            "ตัวอักษร ใช้ได้เฉพาะ a-z, A-Z, 0-9 และสัญลักษณ์ _ . - เท่านั้น"
+        ),
+        examples=["john_doe"],
+    )
     email: EmailStr
     password: str = Field(
         ...,
@@ -99,7 +134,12 @@ class UserCreate(BaseModel):
         if not v:
             raise ValueError("กรุณากรอกชื่อ")
         return v
-    
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, v: str) -> str:
+        return normalize_username(v)
+
     @field_validator("email")
     @classmethod
     def validate_email(cls, v: str) -> str:
@@ -119,9 +159,6 @@ class UserCreate(BaseModel):
         return self
 
 class UserProfileUpdate(BaseModel):
-    """ใช้กับ PATCH /auth/me — user แก้ไขชื่อของตัวเองเท่านั้น
-    เบอร์โทร/ช่องทางติดต่ออื่นๆ จัดการผ่าน /my/contacts (routers/my_contacts.py) แยกต่างหาก
-    ไม่ปนกับ field นี้ — กันมี 2 ที่ให้แก้ "เบอร์โทร" ที่ซ้อนทับกันแบบงงๆ"""
     full_name: str = Field(..., min_length=1, max_length=200)
 
     @field_validator("full_name")
@@ -131,6 +168,19 @@ class UserProfileUpdate(BaseModel):
         if not v:
             raise ValueError("กรุณากรอกชื่อ")
         return v
+
+
+class UsernameUpdateRequest(BaseModel):
+    """ใช้กับ PATCH /auth/username — เปลี่ยน username ของตัวเอง แยกจาก UserProfileUpdate
+    (ซึ่งแก้ full_name อย่างเดียว) เพราะ endpoint นี้จำกัดความถี่ 1 ครั้ง/30 วัน (ยกเว้นครั้งแรก
+    ที่ยังไม่เคยตั้งเลย) ดู routers/auth.py: update_username"""
+    username: str = Field(..., min_length=USERNAME_MIN_LENGTH, max_length=USERNAME_MAX_LENGTH)
+
+    @field_validator("username")
+    @classmethod
+    def validate_username(cls, v: str) -> str:
+        return normalize_username(v)
+
 
 class Token(BaseModel):
     access_token: str
@@ -466,6 +516,7 @@ class ApiKeyStatusResponse(BaseModel):
 # ---- สำหรับ GET /auth/me — เช็คสถานะ user แบบ read-only (terms/admin/api-key/suspend) ----
 class UserMeResponse(BaseModel):
     email: str
+    username: Optional[str] = None  # None = ยังไม่เคยตั้ง (เช่น user เก่าก่อนมีฟีเจอร์นี้)
     is_verified: bool
     terms_accepted: bool
     is_admin: bool
@@ -525,6 +576,7 @@ class UserContactResponse(BaseModel):
 class UserAdminResponse(BaseModel):
     id: str
     email: str
+    username: Optional[str] = None
     full_name: Optional[str] = None
     is_verified: bool
     terms_accepted: bool

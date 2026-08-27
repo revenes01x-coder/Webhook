@@ -7,12 +7,12 @@ from smartlpr.database import Base
 def generate_uuid() -> str:
     return uuid.uuid4().hex
 
-
 class User(Base):
     __tablename__ = "users"
 
     id = Column(String(32), primary_key=True, index=True, default=generate_uuid)
     email = Column(String, unique=True, index=True, nullable=False)
+    username = Column(String(32), unique=True, index=True, nullable=True)  # ดู migration note ด้านล่าง
     hashed_password = Column(String, nullable=False)
     is_verified = Column(Boolean, default=False, nullable=False)
     terms_accepted = Column(Boolean, default=False, nullable=False)

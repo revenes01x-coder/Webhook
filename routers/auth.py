@@ -71,6 +71,9 @@ FORGOT_PASSWORD_IP_LOCKOUT_MINUTES = 15
 CHANGE_PASSWORD_LOCKOUT_LIMIT = 5
 CHANGE_PASSWORD_LOCKOUT_MINUTES = 15
 
+USERNAME_CHANGE_LOCKOUT_LIMIT = 1
+USERNAME_CHANGE_LOCKOUT_MINUTES = 30 * 24 * 60 
+
 
 async def _resolve_actor_id_for_logout(token: str, db: AsyncSession) -> str | None:
     """ถอด access token แบบ soft-decode (ไม่ raise แม้ decode ไม่ผ่าน/หมดอายุไปแล้วพอดี) เพื่อหา
@@ -219,6 +222,15 @@ async def register_user(user: schemas.UserCreate, request: Request, db: AsyncSes
     if db_user and db_user.is_verified:
         raise HTTPException(status_code=400, detail="อีเมลนี้มีในระบบแล้ว")
 
+    # [Username Unique] เช็คว่า username ถูกคนอื่นจับจองไปหรือยัง — ยกเว้นกรณีเป็นตัวเองที่กำลัง
+    # resubmit ก่อน verify (db_user ตัวเดียวกับที่จะแก้ไขข้างล่าง ไม่ถือว่าซ้ำ)
+    username_owner_result = await db.execute(
+        select(models.User).filter(models.User.username == user.username)
+    )
+    username_owner = username_owner_result.scalar_one_or_none()
+    if username_owner and (not db_user or username_owner.id != db_user.id):
+        raise HTTPException(status_code=400, detail="username นี้ถูกใช้ไปแล้ว กรุณาเลือกชื่ออื่น")
+
     hashed_password = get_password_hash(user.password)
 
     if db_user:
@@ -243,10 +255,17 @@ async def register_user(user: schemas.UserCreate, request: Request, db: AsyncSes
 
         db_user.hashed_password = hashed_password
         db_user.full_name = user.full_name
+        db_user.username = user.username          # <-- เพิ่ม
         await db.commit()
         new_user = db_user
     else:
-        new_user = models.User(email=user.email, hashed_password=hashed_password, full_name=user.full_name,  is_verified=False)
+        new_user = models.User(
+            email=user.email,
+            username=user.username,                # <-- เพิ่ม
+            hashed_password=hashed_password,
+            full_name=user.full_name,
+            is_verified=False,
+        )
         db.add(new_user)
 
         try:
@@ -254,8 +273,7 @@ async def register_user(user: schemas.UserCreate, request: Request, db: AsyncSes
             await db.refresh(new_user)
         except IntegrityError:
             await db.rollback()
-            raise HTTPException(status_code=400, detail="อีเมลนี้มีในระบบแล้ว")
-
+            raise HTTPException(status_code=400, detail="อีเมลหรือ username นี้มีในระบบแล้ว")  # <-- แก้ข้อความ
     try:
         otp_record = await _create_and_send_otp(db, new_user)
     except RuntimeError as e:
@@ -815,3 +833,67 @@ async def update_me(
     await db.commit()
     await db.refresh(current_user)
     return current_user
+
+@router.patch("/username", response_model=schemas.UserMeResponse)
+async def update_username(
+    payload: schemas.UsernameUpdateRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """เปลี่ยน username ของตัวเอง — จำกัด 1 ครั้ง/30 วัน (แบบเดียวกับ regenerate API key)
+    ยกเว้นครั้งแรกที่ยังไม่เคยตั้งเลย (username เดิมเป็น None — user เก่าก่อนมีฟีเจอร์นี้ หรือ
+    DB ที่เพิ่ง migrate คอลัมน์นี้เข้ามาใหม่) ให้ตั้งได้ฟรีไม่ติด lockout ก่อน"""
+    if payload.username == current_user.username:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="username ใหม่ต้องไม่ซ้ำกับ username เดิม",
+        )
+
+    existing_result = await db.execute(select(models.User).filter(models.User.username == payload.username))
+    existing = existing_result.scalar_one_or_none()
+    if existing and existing.id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="username นี้ถูกใช้ไปแล้ว กรุณาเลือกชื่ออื่น",
+        )
+
+    if current_user.username is not None:
+        await check_and_record(
+            db, f"change_username_{current_user.id}", "change_username",
+            limit=USERNAME_CHANGE_LOCKOUT_LIMIT, window_minutes=USERNAME_CHANGE_LOCKOUT_MINUTES,
+        )
+
+    old_username = current_user.username
+    current_user.username = payload.username
+
+    log_admin_action(
+        db, current_user.id,
+        action="username.change",
+        target_type="user",
+        target_id=current_user.id,
+        detail={"old_username": old_username, "new_username": payload.username},
+        ip_address=request.client.host,
+        actor_type="user",
+    )
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="username นี้ถูกใช้ไปแล้ว กรุณาเลือกชื่ออื่น")
+
+    await db.refresh(current_user)
+    return schemas.UserMeResponse(
+        email=current_user.email,
+        username=current_user.username,
+        is_verified=current_user.is_verified,
+        terms_accepted=current_user.terms_accepted,
+        is_admin=current_user.is_admin,
+        has_api_key=current_user.api_key_hash is not None,
+        is_suspended=current_user.is_suspended,
+        suspended_reason=current_user.suspended_reason,
+        full_name=current_user.full_name,
+        phone=current_user.phone,
+        created_at=current_user.created_at,
+    )
