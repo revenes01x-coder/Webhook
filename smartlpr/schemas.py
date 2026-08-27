@@ -12,7 +12,40 @@ PASSWORD_MIN_LENGTH = 8
 
 PASSWORD_INPUT_MAX_CHARS = 256
 
-_CONTACT_CHANNEL_ICONS = {"line", "email", "phone", "clock", "generic"}
+_CONTACT_CHANNEL_ICONS = {"line", "email", "phone", "clock", "generic", "facebook"}
+
+# ---- User Contact (ข้อมูลติดต่อส่วนตัวของ user เอง — ดู smartlpr/models.py:UserContact) ----
+_USER_CONTACT_CHANNEL_TYPES = {
+    "facebook", "line", "phone", "email", "instagram", "whatsapp", "tiktok", "generic",
+}
+# เบอร์มือถือไทย 10 หลัก ขึ้นต้นด้วย 06/08/09 เท่านั้น (ไม่รองรับเบอร์บ้าน/ต่างประเทศ — ตกลงกันไว้
+# ให้ง่ายและบังคับรูปแบบชัดเจน) เช็คกับตัวเลขล้วนหลังตัด - หรือช่องว่างออกแล้วเท่านั้น
+_THAI_MOBILE_RE = re.compile(r"^0[689]\d{8}$")
+
+
+def normalize_user_contact_value(channel_type: str, value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ValueError("ห้ามเว้นว่าง")
+
+    if channel_type == "phone":
+        digits = re.sub(r"[^0-9]", "", value)
+        if not _THAI_MOBILE_RE.match(digits):
+            raise ValueError("เบอร์โทรต้องเป็นเบอร์มือถือไทย 10 หลัก ขึ้นต้นด้วย 06, 08 หรือ 09 เท่านั้น")
+        return digits
+
+    if channel_type == "email":
+        # เช็คคร่าวๆ พอ (ไม่ใช้ EmailStr ตรงๆ เพราะ field นี้เป็น value กลางที่ใช้ร่วมกับ
+        # channel_type อื่นด้วย) ความเข้มงวดระดับ EmailStr ไม่จำเป็นสำหรับข้อมูลติดต่อเสริมแบบนี้
+        local_part, _, domain_part = value.partition("@")
+        if not local_part or "." not in domain_part or domain_part.startswith(".") or domain_part.endswith("."):
+            raise ValueError("รูปแบบอีเมลไม่ถูกต้อง")
+        return value
+
+    return value
+
+
+_CONTACT_CHANNEL_ICONS = {"line", "email", "phone", "clock", "generic", "facebook"}
 
 def _validate_password_rules(v: str) -> str:
     v = v.strip()
@@ -423,6 +456,66 @@ class UserMeResponse(BaseModel):
         from_attributes = True
 
 
+class UserContactCreate(BaseModel):
+    channel_type: str = Field(..., description=f"ต้องเป็นหนึ่งใน {sorted(_USER_CONTACT_CHANNEL_TYPES)}")
+    value: str = Field(..., min_length=1, max_length=300)
+    link: Optional[str] = Field(default=None, max_length=2048, description="ไม่บังคับ — ลิงก์ที่กดแล้วเปิดได้")
+
+    @field_validator("channel_type")
+    @classmethod
+    def validate_channel_type(cls, v: str) -> str:
+        v = (v or "").strip().lower()
+        if v not in _USER_CONTACT_CHANNEL_TYPES:
+            raise ValueError(f"channel_type ต้องเป็นหนึ่งใน {sorted(_USER_CONTACT_CHANNEL_TYPES)}")
+        return v
+
+    @field_validator("link")
+    @classmethod
+    def strip_link(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip()
+        return v or None  # ถ้าพิมพ์แต่ space ให้ถือว่าไม่ได้ใส่ลิงก์
+
+    @model_validator(mode="after")
+    def normalize_value(self):
+        self.value = normalize_user_contact_value(self.channel_type, self.value)
+        return self
+
+
+class UserContactUpdate(BaseModel):
+    value: str = Field(..., min_length=1, max_length=300)
+    link: Optional[str] = Field(default=None, max_length=2048)
+
+    @field_validator("value")
+    @classmethod
+    def strip_value(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("ห้ามเว้นว่าง")
+        return v
+
+    @field_validator("link")
+    @classmethod
+    def strip_link(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip()
+        return v or None
+
+
+class UserContactResponse(BaseModel):
+    id: int
+    channel_type: str
+    value: str
+    link: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
 # ---- สำหรับ Admin: จัดการ user ----
 class UserAdminResponse(BaseModel):
     # [UUID PK]: id ตอนนี้เป็น UUID hex string (ตรงกับ User.id หลังเปลี่ยน PK) ไม่ใช่ int แล้ว
@@ -443,6 +536,9 @@ class UserAdminDetailResponse(UserAdminResponse):
     webhook_count: int
     camera_count: int
     access_requests: List[AccessRequestResponse] = []
+    # ข้อมูลติดต่อส่วนตัวที่ user กรอกเองผ่าน /my/contacts (facebook/line/เบอร์โทร/ฯลฯ)
+    # ให้ admin ดูประกอบการพิจารณาในหน้ารายละเอียด user — read-only ฝั่ง admin (แก้ไม่ได้)
+    contacts: List[UserContactResponse] = []
 
 
 class UserSuspendUpdate(BaseModel):

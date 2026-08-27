@@ -191,3 +191,24 @@ class ContactChannel(Base):
     icon = Column(String, nullable=False, default="generic")  # ใช้เลือกไอคอนฝั่ง frontend: line, email, phone, clock, generic
     display_order = Column(Integer, nullable=False, default=0, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class UserContact(Base):
+    """ข้อมูลช่องทางติดต่อ "ส่วนตัว" ของ user เอง (ต่างจาก ContactChannel ด้านบนซึ่งเป็นช่องทาง
+    ติดต่อ "ทีมงาน" ที่ admin ตั้งไว้ให้ user ทุกคนเห็นเหมือนกัน) — user เพิ่ม/แก้ไข/ลบเองได้ผ่าน
+    /my/contacts (routers/my_contacts.py) เพื่อให้ admin เห็นประกอบการพิจารณาในหน้ารายละเอียด
+    user คนนั้น (GET /admin/users/{user_id} -> UserAdminDetailResponse.contacts)
+
+    จำกัด 1 รายการต่อ 1 ประเภท (channel_type) ต่อ user เท่านั้น (unique constraint ด้านล่าง) —
+    ถ้ามีประเภทนั้นอยู่แล้วต้องแก้ไขรายการเดิม (PATCH) ไม่ใช่สร้างซ้ำ (POST จะถูกปฏิเสธ 400)"""
+    __tablename__ = "user_contacts"
+    __table_args__ = (UniqueConstraint("user_id", "channel_type", name="uq_user_contact_type"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String(32), ForeignKey("users.id"), nullable=False, index=True)
+    channel_type = Column(String(20), nullable=False)
+    value = Column(String(300), nullable=False)
+    link = Column(String(2048), nullable=True)  # ไม่บังคับ — URL ที่กดแล้วเปิดได้ เช่นลิงก์โปรไฟล์ FB
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
