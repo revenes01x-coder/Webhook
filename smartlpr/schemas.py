@@ -97,9 +97,6 @@ def _validate_password_rules(v: str) -> str:
 
 # ---- สำหรับการสมัครสมาชิกและเข้าสู่ระบบ ----
 class UserCreate(BaseModel):
-    full_name: str = Field(..., min_length=1, max_length=200, description="ชื่อ")
-    # [Username]: บังคับกรอกตอนสมัคร ไม่ซ้ำใครในระบบ — login ยังใช้อีเมลเหมือนเดิม (username ไม่ใช่
-    # ช่องทาง login) ดู normalize_username() ด้านบนสำหรับกฎอักขระ/ความยาวแบบเต็ม
     username: str = Field(
         ...,
         min_length=USERNAME_MIN_LENGTH,
@@ -127,14 +124,6 @@ class UserCreate(BaseModel):
         description="กรอกรหัสผ่านซ้ำอีกครั้งเพื่อยืนยัน ต้องตรงกับ password",
     )
 
-    @field_validator("full_name")
-    @classmethod
-    def strip_full_name(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("กรุณากรอกชื่อ")
-        return v
-
     @field_validator("username")
     @classmethod
     def validate_username(cls, v: str) -> str:
@@ -157,17 +146,6 @@ class UserCreate(BaseModel):
         if self.password != self.confirm_password:
             raise ValueError("รหัสผ่านและรหัสผ่านยืนยันไม่ตรงกัน")
         return self
-
-class UserProfileUpdate(BaseModel):
-    full_name: str = Field(..., min_length=1, max_length=200)
-
-    @field_validator("full_name")
-    @classmethod
-    def strip_full_name(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("กรุณากรอกชื่อ")
-        return v
 
 
 class UsernameUpdateRequest(BaseModel):
@@ -523,7 +501,6 @@ class UserMeResponse(BaseModel):
     has_api_key: bool
     is_suspended: bool
     suspended_reason: Optional[str] = None
-    full_name: Optional[str] = None
     phone: Optional[str] = None
     created_at: datetime
 
@@ -577,7 +554,6 @@ class UserAdminResponse(BaseModel):
     id: str
     email: str
     username: Optional[str] = None
-    full_name: Optional[str] = None
     is_verified: bool
     terms_accepted: bool
     is_admin: bool

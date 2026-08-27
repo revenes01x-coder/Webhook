@@ -254,16 +254,14 @@ async def register_user(user: schemas.UserCreate, request: Request, db: AsyncSes
                 )
 
         db_user.hashed_password = hashed_password
-        db_user.full_name = user.full_name
-        db_user.username = user.username          # <-- เพิ่ม
+        db_user.username = user.username
         await db.commit()
         new_user = db_user
     else:
         new_user = models.User(
             email=user.email,
-            username=user.username,                # <-- เพิ่ม
+            username=user.username,
             hashed_password=hashed_password,
-            full_name=user.full_name,
             is_verified=False,
         )
         db.add(new_user)
@@ -273,7 +271,7 @@ async def register_user(user: schemas.UserCreate, request: Request, db: AsyncSes
             await db.refresh(new_user)
         except IntegrityError:
             await db.rollback()
-            raise HTTPException(status_code=400, detail="อีเมลหรือ username นี้มีในระบบแล้ว")  # <-- แก้ข้อความ
+            raise HTTPException(status_code=400, detail="อีเมลหรือ username นี้มีในระบบแล้ว")
     try:
         otp_record = await _create_and_send_otp(db, new_user)
     except RuntimeError as e:
@@ -795,44 +793,16 @@ async def logout(
 def get_me(current_user: models.User = Depends(get_current_user)):
     return schemas.UserMeResponse(
         email=current_user.email,
+        username=current_user.username,
         is_verified=current_user.is_verified,
         terms_accepted=current_user.terms_accepted,
         is_admin=current_user.is_admin,
         has_api_key=current_user.api_key_hash is not None,
         is_suspended=current_user.is_suspended,
         suspended_reason=current_user.suspended_reason,
-        full_name=current_user.full_name,
         phone=current_user.phone,
         created_at=current_user.created_at,
     )
-
-@router.patch("/me", response_model=schemas.UserMeResponse)
-async def update_me(
-    payload: schemas.UserProfileUpdate,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    updates = payload.model_dump(exclude_unset=True)
-    if not updates:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ไม่มีข้อมูลที่จะแก้ไข")
-
-    for field, value in updates.items():
-        setattr(current_user, field, value)
-
-    log_admin_action(
-        db, current_user.id,
-        action="profile.update",
-        target_type="user",
-        target_id=current_user.id,
-        detail=updates,
-        ip_address=request.client.host,
-        actor_type="user",
-    )
-
-    await db.commit()
-    await db.refresh(current_user)
-    return current_user
 
 @router.patch("/username", response_model=schemas.UserMeResponse)
 async def update_username(
@@ -893,7 +863,6 @@ async def update_username(
         has_api_key=current_user.api_key_hash is not None,
         is_suspended=current_user.is_suspended,
         suspended_reason=current_user.suspended_reason,
-        full_name=current_user.full_name,
         phone=current_user.phone,
         created_at=current_user.created_at,
     )
