@@ -763,16 +763,16 @@ async def logout(
 
     await revoke_token(db, token)
 
-    user_id = actor_id
-    if not user_id and refresh_token:
+    if refresh_token:
         token_hash = hash_refresh_token(refresh_token)
-        result = await db.execute(select(models.RefreshToken).filter(models.RefreshToken.token_hash == token_hash))
+        result = await db.execute(
+            select(models.RefreshToken).filter(models.RefreshToken.token_hash == token_hash)
+        )
         record = result.scalar_one_or_none()
         if record:
-            user_id = record.user_id
-
-    if user_id:
-        await _revoke_all_sessions(db, user_id)
+            if not actor_id:
+                actor_id = record.user_id
+            await _revoke_token_family(db, record.family_id)
 
     log_admin_action(
         db, actor_id,
@@ -787,7 +787,7 @@ async def logout(
 
     _clear_refresh_cookie(response)
 
-    return {"message": "ออกจากระบบทุกอุปกรณ์เรียบร้อยแล้ว"}
+    return {"message": "ออกจากระบบเรียบร้อยแล้ว"}
 
 @router.get("/me", response_model=schemas.UserMeResponse)
 def get_me(current_user: models.User = Depends(get_current_user)):
