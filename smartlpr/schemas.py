@@ -592,11 +592,17 @@ class ContactChannelResponse(BaseModel):
 
 
 class ContactChannelCreate(BaseModel):
+    """[Format Guard]: value ถูกบังคับรูปแบบตาม icon ที่เลือก ด้วยฟังก์ชันเดียวกับที่
+    /my/contacts ใช้ (normalize_user_contact_value ด้านบนของไฟล์นี้) — icon="phone" ต้องเป็น
+    เบอร์มือถือไทย 10 หลัก (เก็บเป็นตัวเลขล้วนหลัง normalize เหมือน UserContact ทุกประการ),
+    icon="email" ต้องมีรูปแบบอีเมลถูกต้อง, ไอคอนอื่นๆ (line/facebook/clock/generic) บังคับความยาว
+    ขั้นต่ำ _CONTACT_VALUE_MIN_LENGTH ตัวอักษร — เดิม endpoint นี้เช็คแค่ไม่ว่างเปล่าเท่านั้น
+    ทำให้ตั้งไอคอน "เบอร์โทรศัพท์" แต่ค่าเป็นข้อความอะไรก็ได้หลุดผ่านไปแสดงต่อผู้ใช้จริงได้"""
     label: str = Field(..., min_length=1, max_length=100)
     value: str = Field(..., min_length=1, max_length=300)
     icon: str = Field(default="generic")
 
-    @field_validator("label", "value")
+    @field_validator("label")
     @classmethod
     def strip_and_require_nonblank(cls, v: str) -> str:
         v = v.strip()
@@ -612,14 +618,28 @@ class ContactChannelCreate(BaseModel):
             raise ValueError(f"icon ต้องเป็นหนึ่งใน {sorted(_CONTACT_CHANNEL_ICONS)}")
         return v
 
+    @model_validator(mode="after")
+    def normalize_value(self):
+        # ทำหลัง field_validator ของ icon (จึงได้ icon ที่ normalize แล้ว) — icon ที่นี่ไม่ได้อยู่ใน
+        # _USER_CONTACT_CHANNEL_TYPES เสมอไป (เช่น "clock") แต่ normalize_user_contact_value ไม่ได้
+        # เช็ค membership ของ type เอง มันแค่ switch พฤติกรรมตาม "phone"/"email"/อื่นๆ จึงใช้ร่วมกันได้ตรงๆ
+        self.value = normalize_user_contact_value(self.icon, self.value)
+        return self
+
 
 class ContactChannelUpdate(BaseModel):
-    """PATCH แบบ partial — ฟิลด์ที่ไม่ส่งมาจะไม่ถูกแตะ (ดู routers/contact.py: exclude_unset=True)"""
+    """PATCH แบบ partial — ฟิลด์ที่ไม่ส่งมาจะไม่ถูกแตะ (ดู routers/contact.py: exclude_unset=True)
+
+    [Format Guard]: ไม่ validate รูปแบบของ value ตาม icon ที่ระดับ schema นี้ตรงๆ เพราะเป็น partial
+    update — ถ้าส่งมาแค่ value โดยไม่ส่ง icon มาด้วย ต้องรู้ icon "เดิม" ของ record นั้นก่อนถึงจะ
+    เช็ครูปแบบได้ถูกต้อง (กลับกันก็เช่นกัน: ส่งมาแค่ icon ใหม่ ต้องเอา value เดิมมาเช็คกับ icon ใหม่)
+    จุดที่รู้ทั้งค่าเดิมและค่าใหม่พร้อมกันคือ routers/contact.py:update_contact_channel ซึ่งเรียก
+    normalize_user_contact_value (ตัวเดียวกับ ContactChannelCreate/UserContactCreate) ที่นั่นแทน"""
     label: Optional[str] = Field(default=None, min_length=1, max_length=100)
     value: Optional[str] = Field(default=None, min_length=1, max_length=300)
     icon: Optional[str] = None
 
-    @field_validator("label", "value")
+    @field_validator("label")
     @classmethod
     def strip_and_require_nonblank(cls, v: Optional[str]) -> Optional[str]:
         if v is None:

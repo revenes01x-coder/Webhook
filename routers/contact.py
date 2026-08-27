@@ -6,6 +6,7 @@ from smartlpr import models
 import smartlpr.schemas as schemas
 from smartlpr.database import get_db
 from smartlpr.security import get_current_user, require_admin
+from smartlpr.schemas import normalize_user_contact_value
 from services.audit_log import log_admin_action
 
 router = APIRouter(tags=["Contact"])
@@ -43,7 +44,11 @@ async def create_contact_channel(
     admin: models.User = Depends(require_admin),
 ):
     """เพิ่มช่องทางติดต่อใหม่ — ต่อท้ายลิสต์เสมอ (display_order = ค่าสูงสุดปัจจุบัน + 1)
-    admin ใช้ปุ่มเลื่อนขึ้น/ลง (ดู reorder_contact_channel ด้านล่าง) จัดลำดับใหม่เองทีหลังได้"""
+    admin ใช้ปุ่มเลื่อนขึ้น/ลง (ดู reorder_contact_channel ด้านล่าง) จัดลำดับใหม่เองทีหลังได้
+
+    [Format Guard]: payload.value ถูกตรวจ/normalize ตาม payload.icon ไปแล้วตั้งแต่ระดับ schema
+    (ดู schemas.py: ContactChannelCreate.normalize_value — ใช้ normalize_user_contact_value
+    ฟังก์ชันเดียวกับ /my/contacts) ไม่ต้องเช็คซ้ำในนี้อีก"""
     max_order = (await db.execute(select(func.max(models.ContactChannel.display_order)))).scalar_one()
 
     new_channel = models.ContactChannel(
@@ -76,7 +81,14 @@ async def update_contact_channel(
     admin: models.User = Depends(require_admin),
 ):
     """แก้ไขบางฟิลด์ (partial update) — ฟิลด์ที่ไม่ได้ส่งมาใน body จะไม่ถูกแตะเลย
-    (exclude_unset=True)"""
+    (exclude_unset=True)
+
+    [Format Guard]: ต่างจาก create ตรงที่ schema (ContactChannelUpdate) validate รูปแบบ value
+    ตาม icon เองไม่ได้ทั้งหมด เพราะเป็น partial update (ส่งมาแค่ value อย่างเดียว หรือแค่ icon
+    อย่างเดียวก็ได้) จุดนี้จึงเป็นคนรวม icon/value "ผลลัพธ์สุดท้าย" หลัง merge กับ record เดิมก่อน
+    ค่อยเรียก normalize_user_contact_value เช็ค/normalize ให้ — กันเคสแก้แค่ icon จาก 'generic'
+    เป็น 'phone' แต่ value เดิมไม่ใช่รูปแบบเบอร์โทรหลุดผ่านไปได้ (หรือกลับกัน แก้แค่ value ให้เป็น
+    ข้อความสั้นๆ ทั้งที่ icon เดิมเป็น 'phone' อยู่แล้ว)"""
     channel = await _get_channel_or_404(db, channel_id)
 
     updates = payload.model_dump(exclude_unset=True)
@@ -85,6 +97,14 @@ async def update_contact_channel(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="ไม่มีข้อมูลที่จะแก้ไข",
         )
+
+    if "value" in updates or "icon" in updates:
+        resulting_icon = updates.get("icon", channel.icon)
+        resulting_value = updates.get("value", channel.value)
+        try:
+            updates["value"] = normalize_user_contact_value(resulting_icon, resulting_value)
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     for field, value in updates.items():
         setattr(channel, field, value)
