@@ -10,11 +10,9 @@ _OTP_RE = re.compile(r"^\d{6}$")
 PASSWORD_MAX_BYTES = 72
 PASSWORD_MIN_LENGTH = 8
 
-# จำกัดจำนวนตัวอักษรสูงสุดที่ยอมรับตอน parse request body (ไม่ใช่ตัวบังคับความปลอดภัย
-# หลัก แค่กันไม่ให้ client ส่ง payload ใหญ่ผิดปกติเข้ามา) ตัวบังคับจริงคือ PASSWORD_MAX_BYTES
-# ที่เช็คในฟังก์ชัน _validate_password_rules() ด้านล่าง
 PASSWORD_INPUT_MAX_CHARS = 256
 
+_CONTACT_CHANNEL_ICONS = {"line", "email", "phone", "clock", "generic"}
 
 def _validate_password_rules(v: str) -> str:
     v = v.strip()
@@ -502,3 +500,86 @@ class AdminDashboardResponse(BaseModel):
     cameras: DashboardCameraStats
     webhooks: DashboardWebhookStats
     events: DashboardEventQueueStats
+
+class ContactChannelResponse(BaseModel):
+    id: int
+    label: str
+    value: str
+    link: Optional[str] = None
+    icon: str
+    display_order: int
+
+    class Config:
+        from_attributes = True
+
+
+class ContactChannelCreate(BaseModel):
+    label: str = Field(..., min_length=1, max_length=100)
+    value: str = Field(..., min_length=1, max_length=300)
+    link: Optional[str] = Field(default=None, max_length=2048)
+    icon: str = Field(default="generic")
+
+    @field_validator("label", "value")
+    @classmethod
+    def strip_and_require_nonblank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("ห้ามเว้นว่าง")
+        return v
+
+    @field_validator("link")
+    @classmethod
+    def strip_link(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip()
+        return v or None  # ถ้าพิมพ์แต่ space ให้ถือว่าไม่ได้ใส่ลิงก์
+
+    @field_validator("icon")
+    @classmethod
+    def validate_icon(cls, v: str) -> str:
+        v = (v or "generic").strip().lower()
+        if v not in _CONTACT_CHANNEL_ICONS:
+            raise ValueError(f"icon ต้องเป็นหนึ่งใน {sorted(_CONTACT_CHANNEL_ICONS)}")
+        return v
+
+
+class ContactChannelUpdate(BaseModel):
+    """PATCH แบบ partial — ฟิลด์ที่ไม่ส่งมาจะไม่ถูกแตะ (ดู routers/contact.py: exclude_unset=True)
+    ส่ง link=null ตรงๆ ได้ ถ้าต้องการล้างลิงก์ทิ้งให้เหลือข้อความล้วน"""
+    label: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    value: Optional[str] = Field(default=None, min_length=1, max_length=300)
+    link: Optional[str] = Field(default=None, max_length=2048)
+    icon: Optional[str] = None
+
+    @field_validator("label", "value")
+    @classmethod
+    def strip_and_require_nonblank(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("ห้ามเว้นว่าง")
+        return v
+
+    @field_validator("link")
+    @classmethod
+    def strip_link(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip()
+        return v or None
+
+    @field_validator("icon")
+    @classmethod
+    def validate_icon(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip().lower()
+        if v not in _CONTACT_CHANNEL_ICONS:
+            raise ValueError(f"icon ต้องเป็นหนึ่งใน {sorted(_CONTACT_CHANNEL_ICONS)}")
+        return v
+
+
+class ContactChannelReorderRequest(BaseModel):
+    direction: Literal["up", "down"]
