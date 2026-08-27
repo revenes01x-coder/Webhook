@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timezone
 from smartlpr import models
 from smartlpr.database import engine, get_db, SessionLocal
-from routers import auth, webhook, terms, admin, access_request, my_cameras, api_key, partner, contact
+from routers import auth, webhook, terms, admin, access_request, my_cameras, api_key, partner, contact, my_contacts
 from worker import start_scheduler
 import os
 from smartlpr.config import CAPTURES_SAVE_DIR
@@ -99,6 +99,7 @@ app.include_router(my_cameras.router)
 app.include_router(admin.router)
 app.include_router(partner.router)
 app.include_router(contact.router)
+app.include_router(my_contacts.router)
 
 def _is_valid_capture_path(path: str, camera_id: str, kind: str) -> bool:
     """บังคับ path รูปต้องอยู่ใต้ captures/camera_{id}/{kind}/ เท่านั้น (รูปแบบเดียวกับที่

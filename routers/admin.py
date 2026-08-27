@@ -289,9 +289,13 @@ async def get_user_detail(
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    """ดูรายละเอียด user คนเดียว พร้อมจำนวน webhook/camera ที่มี และประวัติคำขอใช้งานระบบ
+    """ดูรายละเอียด user คนเดียว พร้อมจำนวน webhook/camera ที่มี, ประวัติคำขอใช้งานระบบ
     (access_requests) ทั้งหมดที่เคยส่ง เรียงจากล่าสุดไปเก่าสุด — ใช้โชว์ข้อมูลที่ user กรอกตอน
-    สมัครขอใช้งาน (องค์กร/ผู้ติดต่อ/วัตถุประสงค์) ในโมดัล "รายละเอียดผู้ใช้" ฝั่ง admin"""
+    สมัครขอใช้งาน (องค์กร/ผู้ติดต่อ/วัตถุประสงค์) ในโมดัล "รายละเอียดผู้ใช้" ฝั่ง admin
+
+    [Contacts]: เพิ่ม contacts — ข้อมูลติดต่อส่วนตัวที่ user กรอกเองผ่าน /my/contacts (facebook/
+    line/เบอร์โทร/ฯลฯ) ให้ admin เห็นประกอบการพิจารณาด้วย เป็น read-only ฝั่งนี้ (แก้ไม่ได้จากฝั่ง
+    admin — ต้องให้ user แก้ไขเองผ่าน /my/contacts เท่านั้น)"""
     result = await db.execute(select(models.User).filter(models.User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
@@ -312,6 +316,15 @@ async def get_user_detail(
     )
     access_requests = access_requests_result.scalars().all()
 
+    # เพิ่ม: ดึงข้อมูลติดต่อส่วนตัวทั้งหมดของ user คนนี้ (สูงสุด 1 รายการต่อ 1 ประเภท — ดู
+    # UserContact.__table_args__ unique constraint) ให้ admin ดูประกอบในหน้ารายละเอียดผู้ใช้
+    contacts_result = await db.execute(
+        select(models.UserContact)
+        .filter(models.UserContact.user_id == user.id)
+        .order_by(models.UserContact.id.asc())
+    )
+    contacts = contacts_result.scalars().all()
+
     return schemas.UserAdminDetailResponse(
         id=user.id,
         email=user.email,
@@ -323,7 +336,8 @@ async def get_user_detail(
         created_at=user.created_at,
         webhook_count=webhook_count,
         camera_count=camera_count,
-        access_requests=access_requests,   # <-- เพิ่มบรรทัดนี้
+        access_requests=access_requests,
+        contacts=contacts,   # <-- เพิ่มบรรทัดนี้
     )
 
 @router.patch("/users/{user_id}/suspend", response_model=schemas.UserAdminResponse)
