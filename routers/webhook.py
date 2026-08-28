@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 from smartlpr import models
@@ -86,3 +86,78 @@ async def list_my_webhooks(
         .order_by(models.WebhookEndpoint.id.desc())
     )
     return await paginate(db, query, page_params)
+
+
+@router.delete("/{webhook_id}")
+async def delete_webhook(
+    webhook_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(require_access_approved),
+):
+
+    await check_rate_limit(
+        db, f"delete_webhook_{current_user.id}", "delete_webhook", limit=20, window_minutes=60
+    )
+
+    result = await db.execute(
+        select(models.WebhookEndpoint).filter(
+            models.WebhookEndpoint.id == webhook_id,
+            models.WebhookEndpoint.user_id == current_user.id,
+        )
+    )
+    endpoint = result.scalar_one_or_none()
+    if not endpoint:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="ไม่พบ webhook endpoint นี้ในบัญชีของคุณ",
+        )
+
+    # หา id กล้องทั้งหมดที่ผูกกับ endpoint นี้ไว้ก่อน (เอาไปบันทึก audit log — หลังลบจริงหาไม่ได้อีก)
+    cameras_result = await db.execute(
+        select(models.Camera.id).filter(models.Camera.webhook_endpoint_id == endpoint.id)
+    )
+    camera_ids = [cid for (cid,) in cameras_result.all()]
+
+    event_count = (await db.execute(
+        select(func.count()).select_from(models.WebhookEvent)
+        .filter(models.WebhookEvent.webhook_endpoint_id == endpoint.id)
+    )).scalar_one()
+
+    if event_count:
+        await db.execute(
+            update(models.WebhookEvent)
+            .where(models.WebhookEvent.webhook_endpoint_id == endpoint.id)
+            .values(webhook_endpoint_id=None, camera_id=None)
+        )
+
+    if camera_ids:
+        await db.execute(
+            delete(models.Camera).where(models.Camera.webhook_endpoint_id == endpoint.id)
+        )
+
+    log_admin_action(
+        db, current_user.id,
+        action="webhook.delete",
+        target_type="webhook_endpoint",
+        target_id=endpoint.id,
+        detail={
+            "url": endpoint.url,
+            "deleted_camera_ids": camera_ids,
+            "orphaned_event_count": event_count,
+        },
+        actor_type="user",
+    )
+
+    url = endpoint.url
+    await db.delete(endpoint)
+    await db.commit()
+
+    camera_note = f"พร้อมกล้องที่ผูกไว้ทั้งหมด {len(camera_ids)} ตัว " if camera_ids else ""
+
+    return {
+        "message": (
+            f"ลบ webhook '{url}' {camera_note}ออกจากระบบเรียบร้อยแล้ว "
+            f"ข้อมูล event ที่เคยบันทึกไว้ ({event_count} รายการ) จะยังคงอยู่ในระบบตามระยะเวลาเก็บข้อมูลปกติ "
+            "(ไม่ผูกกับ webhook/กล้องนี้อีกต่อไป) URL นี้สามารถนำไปสร้าง webhook ใหม่ได้ทันที"
+        )
+    }
