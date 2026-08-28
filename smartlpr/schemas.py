@@ -316,6 +316,29 @@ class WebhookStatusUpdate(BaseModel):
         return v or None  # ถ้าพิมพ์แต่ space ให้ถือว่าไม่ได้ใส่
 
 
+class WebhookAdminDeleteRequest(BaseModel):
+    """ใช้กับ DELETE /admin/webhooks/{id} — admin ลบ webhook endpoint ของ user ทิ้งอย่างถาวร
+
+    ต่างจาก WebhookStatusUpdate (ปิดใช้งานชั่วคราว, admin_note ไม่บังคับ) ตรงที่การลบเป็น action
+    ที่ย้อนกลับไม่ได้ (endpoint + กล้องที่ผูกไว้ทั้งหมดหายจาก DB จริง) จึงบังคับให้ admin ต้อง
+    ระบุเหตุผลเสมอ — เหตุผลนี้จะถูกบันทึกลง audit log และแนบไปในอีเมลแจ้ง owner ด้วย
+    (ดู routers/admin.py: delete_webhook_by_admin)"""
+    admin_note: str = Field(
+        ...,
+        min_length=1,
+        max_length=1000,
+        description="เหตุผลที่ลบ webhook endpoint นี้ (บังคับกรอก — จะถูกส่งไปในอีเมลแจ้ง owner ด้วย)",
+    )
+
+    @field_validator("admin_note")
+    @classmethod
+    def strip_and_require_nonblank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("กรุณาระบุเหตุผลในการลบ webhook endpoint นี้")
+        return v
+
+
 # ---- สำหรับ Access Request (step 3) ----
 class AccessRequestCreate(BaseModel):
     organization_name: str = Field(..., min_length=1, max_length=200)

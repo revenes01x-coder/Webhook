@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks, Request
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -18,6 +18,7 @@ from services.email_service import (
     send_account_unsuspended_email,
     send_webhook_disabled_email,
     send_webhook_enabled_email,
+    send_webhook_deleted_by_admin_email,
 )
 from smartlpr.pagination import PageParams, paginate
 
@@ -496,6 +497,98 @@ async def set_webhook_status(
     return endpoint
 
 
+@router.delete("/webhooks/{webhook_id}")
+async def delete_webhook_by_admin(
+    webhook_id: int,
+    payload: schemas.WebhookAdminDeleteRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    admin: models.User = Depends(require_admin),
+):
+
+    result = await db.execute(select(models.WebhookEndpoint).filter(models.WebhookEndpoint.id == webhook_id))
+    endpoint = result.scalar_one_or_none()
+    if not endpoint:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ไม่พบ webhook endpoint นี้")
+
+    owner = None
+    if endpoint.user_id:
+        owner_result = await db.execute(select(models.User).filter(models.User.id == endpoint.user_id))
+        owner = owner_result.scalar_one_or_none()
+
+    # หา id กล้องทั้งหมดที่ผูกกับ endpoint นี้ไว้ก่อน (เอาไปบันทึก audit log และนับจำนวนแนบ
+    # ไปในอีเมล — หลังลบจริงหาไม่ได้อีก) — pattern เดียวกับ routers/webhook.py:delete_webhook
+    cameras_result = await db.execute(
+        select(models.Camera.id).filter(models.Camera.webhook_endpoint_id == endpoint.id)
+    )
+    camera_ids = [cid for (cid,) in cameras_result.all()]
+
+    event_count = (await db.execute(
+        select(func.count()).select_from(models.WebhookEvent)
+        .filter(models.WebhookEvent.webhook_endpoint_id == endpoint.id)
+    )).scalar_one()
+
+    if event_count:
+        await db.execute(
+            update(models.WebhookEvent)
+            .where(models.WebhookEvent.webhook_endpoint_id == endpoint.id)
+            .values(webhook_endpoint_id=None, camera_id=None)
+        )
+
+    if camera_ids:
+        await db.execute(
+            delete(models.Camera).where(models.Camera.webhook_endpoint_id == endpoint.id)
+        )
+
+    url = endpoint.url
+
+    # [Audit Log]: บันทึกก่อน commit เสมอ ให้อยู่ transaction เดียวกับการลบจริง (atomicity)
+    # [IP Log]: ส่ง IP ของ admin ที่ทำรายการไปด้วย เหมือน endpoint อื่นๆ ในไฟล์นี้
+    # actor_type ไม่ต้องระบุ — ดีฟอลต์ "admin" อยู่แล้ว (ดู services/audit_log.py)
+    log_admin_action(
+        db, admin.id,
+        action="webhook.delete",
+        target_type="webhook_endpoint",
+        target_id=endpoint.id,
+        detail={
+            "url": url,
+            "deleted_camera_ids": camera_ids,
+            "orphaned_event_count": event_count,
+            "admin_note": payload.admin_note,
+        },
+        ip_address=request.client.host,
+    )
+
+    await db.delete(endpoint)
+    await db.commit()
+
+    if owner:
+        try:
+            await asyncio.to_thread(
+                send_webhook_deleted_by_admin_email,
+                owner.email, url, payload.admin_note, len(camera_ids),
+            )
+        except RuntimeError as e:
+            logging.error(f"ส่งอีเมลแจ้งลบ webhook (id={webhook_id}) โดย admin ไม่สำเร็จ: {e}")
+    else:
+        # ไม่ควรเกิดขึ้นบ่อย (WebhookEndpoint.user_id nullable แต่ตามปกติจะมีเจ้าของเสมอ) —
+        # log ไว้เฉยๆ ไม่ raise เพราะการลบ commit ไปเรียบร้อยแล้ว ไม่อยากให้ response ล้มเพราะเรื่องนี้
+        logging.error(
+            f"ไม่พบเจ้าของ webhook endpoint id={webhook_id} (user_id={endpoint.user_id}) "
+            "— ข้ามการส่งอีเมลแจ้งลบ"
+        )
+
+    camera_note = f"พร้อมกล้องที่ผูกไว้ทั้งหมด {len(camera_ids)} ตัว " if camera_ids else ""
+
+    return {
+        "message": (
+            f"ลบ webhook '{url}' {camera_note}ออกจากระบบเรียบร้อยแล้ว "
+            f"ข้อมูล event ที่เคยบันทึกไว้ ({event_count} รายการ) จะยังคงอยู่ในระบบตามระยะเวลาเก็บข้อมูลปกติ "
+            "(ไม่ผูกกับ webhook/กล้องนี้อีกต่อไป)"
+        )
+    }
+
+
 @router.get("/audit-log", response_model=schemas.PaginatedResponse[schemas.AdminAuditLogResponse])
 async def list_admin_audit_log(
     actor_id: Optional[str] = Query(
@@ -512,17 +605,7 @@ async def list_admin_audit_log(
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
-    """ประวัติการกระทำทั้งหมดในระบบ (immutable — ไม่มี endpoint แก้ไข/ลบ record ในตารางนี้โดย
-    เจตนา) ครอบคลุมทั้ง 3 ประเภทผู้ทำรายการ (ดู smartlpr/models.py: AdminAuditLog.actor_type):
-    admin (อนุมัติ/ปฏิเสธคำขอใช้งาน, ระงับ/ปลดระงับ user, เปิด/ปิด webhook endpoint), user
-    (login/logout, เพิ่ม webhook/กล้อง, เปลี่ยน/ตั้งรหัสผ่านใหม่ ฯลฯ) และ system (circuit
-    breaker ตัดไฟ/ฟื้น webhook อัตโนมัติ, ลบกล้องที่ยืนยัน RTSP ไม่ผ่านครบโควต้า)
 
-    outerjoin กับ users (ไม่ใช่ join ธรรมดา) เพราะ actor_type="system" ไม่มี actor_id ผูกด้วยเลย
-    (เป็น NULL) — join ธรรมดาจะทำให้แถวพวกนี้หายไปจากผลลัพธ์ทั้งที่เป็น record ที่ถูกต้อง
-    พร้อม ip_address ของผู้ทำรายการตอนทำรายการ (บันทึกไว้ตั้งแต่ log_admin_action, เป็น None
-    เสมอสำหรับ actor_type="system") ถูกลบทิ้งอัตโนมัติเป็นระยะตาม ADMIN_AUDIT_LOG_RETENTION_DAYS
-    (ดู worker.py:cleanup_old_audit_logs)"""
     base_query = (
         select(models.AdminAuditLog, models.User.email)
         .outerjoin(models.User, models.AdminAuditLog.actor_id == models.User.id)

@@ -377,6 +377,35 @@ def send_webhook_enabled_email(to_email: str, target_url: str) -> None:
     )
 
 
+def send_webhook_deleted_by_admin_email(
+    to_email: str, target_url: str, reason: str, deleted_camera_count: int = 0
+) -> None:
+
+    detail_rows = [("URL ที่ถูกลบ", target_url), ("เหตุผล", reason)]
+
+    note_lines = [
+        "Webhook Endpoint นี้ถูกลบออกจากระบบอย่างถาวรแล้ว ไม่สามารถกู้คืนได้ หากต้องการใช้งาน URL "
+        "นี้อีกครั้ง ท่านสามารถสร้าง webhook ใหม่ได้ทันทีผ่านหน้าจัดการ Webhook ของท่าน",
+    ]
+    if deleted_camera_count:
+        note_lines.append(
+            f"กล้องที่เคยผูกกับ Webhook Endpoint นี้ทั้งหมด {deleted_camera_count} ตัว ถูกลบออกจาก"
+            "ระบบไปพร้อมกันด้วย (ข้อมูลป้ายทะเบียนที่เคยบันทึกไว้ก่อนหน้านี้จะยังคงอยู่ในระบบตาม"
+            "ระยะเวลาเก็บข้อมูลปกติ ไม่ถูกลบไปด้วย)"
+        )
+    note_lines.append("หากมีข้อสงสัย กรุณาติดต่อผู้ดูแลระบบเพื่อสอบถามรายละเอียดเพิ่มเติม")
+
+    _send_templated_email(
+        to_email,
+        subject="แจ้งเตือน: Webhook Endpoint ของท่านถูกลบโดยผู้ดูแลระบบ - SmartLPR",
+        heading="Webhook Endpoint ถูกลบโดยผู้ดูแลระบบ",
+        intro_lines=["Webhook Endpoint ต่อไปนี้ของท่านถูกผู้ดูแลระบบลบออกจากระบบอย่างถาวร"],
+        accent="danger",
+        detail_rows=detail_rows,
+        note_lines=note_lines,
+    )
+
+
 def send_password_changed_email(to_email: str) -> None:
     _send_templated_email(
         to_email,
