@@ -72,8 +72,7 @@ CHANGE_PASSWORD_LOCKOUT_LIMIT = 5
 CHANGE_PASSWORD_LOCKOUT_MINUTES = 15
 
 USERNAME_CHANGE_LOCKOUT_LIMIT = 1
-USERNAME_CHANGE_LOCKOUT_MINUTES = 30 * 24 * 60 
-
+USERNAME_CHANGE_LOCKOUT_MINUTES = 7 * 24 * 60 
 
 async def _resolve_actor_id_for_logout(token: str, db: AsyncSession) -> str | None:
     """ถอด access token แบบ soft-decode (ไม่ raise แม้ decode ไม่ผ่าน/หมดอายุไปแล้วพอดี) เพื่อหา
@@ -811,7 +810,7 @@ async def update_username(
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """เปลี่ยน username ของตัวเอง — จำกัด 1 ครั้ง/30 วัน (แบบเดียวกับ regenerate API key)
+    """เปลี่ยน username ของตัวเอง — จำกัด 1 ครั้ง/7 วัน (แบบเดียวกับ regenerate API key)
     ยกเว้นครั้งแรกที่ยังไม่เคยตั้งเลย (username เดิมเป็น None — user เก่าก่อนมีฟีเจอร์นี้ หรือ
     DB ที่เพิ่ง migrate คอลัมน์นี้เข้ามาใหม่) ให้ตั้งได้ฟรีไม่ติด lockout ก่อน"""
     if payload.username == current_user.username:
