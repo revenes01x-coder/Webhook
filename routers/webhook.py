@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy import select, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
@@ -16,6 +16,7 @@ router = APIRouter(prefix="/webhook", tags=["Webhook Management"])
 @router.post("/add", response_model=schemas.WebhookResponse)
 async def add_webhook(
     webhook: schemas.WebhookCreate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(require_access_approved),
 ):
@@ -59,6 +60,7 @@ async def add_webhook(
         target_type="webhook_endpoint",
         target_id=new_endpoint.id,
         detail={"url": url_str},
+        ip_address=request.client.host,
         actor_type="user",
     )
 
@@ -90,7 +92,8 @@ async def list_my_webhooks(
 
 @router.delete("/{webhook_id}")
 async def delete_webhook(
-    webhook_id: int,
+    webhook_id: str,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(require_access_approved),
 ):
@@ -145,6 +148,7 @@ async def delete_webhook(
             "deleted_camera_ids": camera_ids,
             "orphaned_event_count": event_count,
         },
+        ip_address=request.client.host,
         actor_type="user",
     )
 

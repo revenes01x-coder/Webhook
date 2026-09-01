@@ -1,5 +1,5 @@
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
@@ -17,6 +17,7 @@ router = APIRouter(prefix="/partner", tags=["Partner Integration"])
 @router.post("/cameras", response_model=schemas.MyCameraResponse)
 async def add_camera_from_partner(
     payload: schemas.PartnerCameraCreate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(require_api_key),
 ):
@@ -83,6 +84,7 @@ async def add_camera_from_partner(
         target_type="camera",
         target_id=new_camera.id,
         detail={"webhook_endpoint_id": webhook.id},
+        ip_address=request.client.host,
         actor_type="user",
     )
 
@@ -117,6 +119,7 @@ async def add_camera_from_partner(
 @router.post("/cameras/status")
 async def update_camera_status_from_partner(
     payload: schemas.PartnerCameraStatusUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(require_api_key),
 ):
@@ -156,6 +159,7 @@ async def update_camera_status_from_partner(
         target_type="camera",
         target_id=camera.id,
         detail={"is_active": payload.is_active},
+        ip_address=request.client.host,
         actor_type="user",
     )
 
@@ -200,6 +204,7 @@ async def get_camera_verification_status(
 @router.delete("/cameras/{camera_id}")
 async def delete_camera_from_partner(
     camera_id: str,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(require_api_key),
 ):
@@ -250,6 +255,7 @@ async def delete_camera_from_partner(
             "orphaned_event_count": event_count,  # เดิมชื่อ deleted_event_count — event ไม่ได้ถูกลบแล้ว แค่ตัด FK
             "captures_dir": f"captures/camera_{camera_id}",  # ไฟล์รูปยังอยู่ตรงนี้ ไม่ถูกลบ
         },
+        ip_address=request.client.host,
         actor_type="user",
     )
 

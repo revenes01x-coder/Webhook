@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
@@ -52,6 +52,7 @@ async def list_my_contacts(
 @router.post("", response_model=schemas.UserContactResponse)
 async def add_my_contact(
     payload: schemas.UserContactCreate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
@@ -75,6 +76,7 @@ async def add_my_contact(
     new_contact = models.UserContact(
         user_id=current_user.id,
         channel_type=payload.channel_type,
+        label=payload.label,
         value=payload.value,  # ผ่าน normalize_user_contact_value() ใน schema แล้ว (ดู model_validator)
     )
     db.add(new_contact)
@@ -97,6 +99,7 @@ async def add_my_contact(
         target_type="user_contact",
         target_id=new_contact.id,
         detail={"channel_type": new_contact.channel_type},
+        ip_address=request.client.host,
         actor_type="user",
     )
 
@@ -109,6 +112,7 @@ async def add_my_contact(
 async def update_my_contact(
     contact_id: int,
     payload: schemas.UserContactUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
@@ -124,6 +128,14 @@ async def update_my_contact(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     contact.value = normalized_value
+    
+    if contact.channel_type == "generic":
+        new_label = (payload.label or "").strip()
+        if not new_label:
+             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ช่องทาง 'อื่นๆ' ต้องระบุชื่อช่องทางด้วย")
+        contact.label = new_label
+    else:
+        contact.label = None
 
     log_admin_action(
         db, current_user.id,
@@ -131,6 +143,7 @@ async def update_my_contact(
         target_type="user_contact",
         target_id=contact.id,
         detail={"channel_type": contact.channel_type},
+        ip_address=request.client.host,
         actor_type="user",
     )
 
@@ -142,6 +155,7 @@ async def update_my_contact(
 @router.delete("/{contact_id}")
 async def delete_my_contact(
     contact_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
@@ -153,6 +167,7 @@ async def delete_my_contact(
         target_type="user_contact",
         target_id=contact.id,
         detail={"channel_type": contact.channel_type},
+        ip_address=request.client.host,
         actor_type="user",
     )
 

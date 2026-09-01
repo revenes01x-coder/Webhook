@@ -443,7 +443,7 @@ async def list_webhooks(
 
 @router.patch("/webhooks/{webhook_id}/status", response_model=schemas.WebhookAdminResponse)
 async def set_webhook_status(
-    webhook_id: int,
+    webhook_id: str,
     payload: schemas.WebhookStatusUpdate,
     background_tasks: BackgroundTasks,
     request: Request,
@@ -499,7 +499,7 @@ async def set_webhook_status(
 
 @router.delete("/webhooks/{webhook_id}")
 async def delete_webhook_by_admin(
-    webhook_id: int,
+    webhook_id: str,
     payload: schemas.WebhookAdminDeleteRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),

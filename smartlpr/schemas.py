@@ -14,7 +14,7 @@ PASSWORD_INPUT_MAX_CHARS = 256
 
 # ---- User Contact (ข้อมูลติดต่อส่วนตัวของ user เอง — ดู smartlpr/models.py:UserContact) ----
 _USER_CONTACT_CHANNEL_TYPES = {
-    "facebook", "line", "phone", "email", "instagram", "whatsapp", "tiktok", "generic",
+    "facebook", "line", "phone", "email", "instagram", "generic",
 }
 # เบอร์มือถือไทย 10 หลัก ขึ้นต้นด้วย 06/08/09 เท่านั้น (ไม่รองรับเบอร์บ้าน/ต่างประเทศ — ตกลงกันไว้
 # ให้ง่ายและบังคับรูปแบบชัดเจน) เช็คกับตัวเลขล้วนหลังตัด - หรือช่องว่างออกแล้วเท่านั้น
@@ -22,10 +22,15 @@ _THAI_MOBILE_RE = re.compile(r"^0[689]\d{8}$")
 _CONTACT_VALUE_MIN_LENGTH = 4
 
 
+_NO_EMOJI_RE = re.compile(r"[^\x00-\x7F\u0E00-\u0E7F]")
+
 def normalize_user_contact_value(channel_type: str, value: str) -> str:
     value = value.strip()
     if not value:
         raise ValueError("ห้ามเว้นว่าง")
+
+    if _NO_EMOJI_RE.search(value):
+        raise ValueError("ไม่อนุญาตให้ใช้ Emoji หรืออักขระพิเศษที่ไม่อยู่ในระบบ")
 
     if channel_type == "phone":
         digits = re.sub(r"[^0-9]", "", value)
@@ -37,6 +42,36 @@ def normalize_user_contact_value(channel_type: str, value: str) -> str:
         local_part, _, domain_part = value.partition("@")
         if not local_part or "." not in domain_part or domain_part.startswith(".") or domain_part.endswith("."):
             raise ValueError("รูปแบบอีเมลไม่ถูกต้อง")
+        return value
+
+    if channel_type == "instagram":
+        value = value.lower()
+        if len(value) > 30:
+            raise ValueError("IG ความยาวสูงสุด 30 ตัวอักษร")
+        if not re.match(r"^[a-z0-9._]+$", value):
+            raise ValueError("IG อนุญาตเฉพาะ a-z, 0-9, จุด (.) และขีดล่าง (_) เท่านั้น ห้ามมีช่องว่าง")
+        if ".." in value:
+            raise ValueError("IG ห้ามใช้จุดติดกัน")
+        return value
+
+    if channel_type == "line":
+        value = value.lower()
+        if not (4 <= len(value) <= 20):
+            raise ValueError("LINE ความยาวต้องอยู่ระหว่าง 4 ถึง 20 ตัวอักษร")
+        if not re.match(r"^[a-z0-9._-]+$", value):
+            raise ValueError("LINE อนุญาตเฉพาะ a-z, 0-9, จุด (.), ขีดล่าง (_) และขีดกลาง (-) เท่านั้น ห้ามมีช่องว่าง")
+        if not re.search(r"[a-z]", value):
+            raise ValueError("LINE ต้องมีตัวอักษรภาษาอังกฤษอย่างน้อย 1 ตัว")
+        return value
+
+    if channel_type == "facebook":
+        value = value.lower()
+        if len(value) < 5:
+            raise ValueError("Facebook ความยาวขั้นต่ำ 5 ตัวอักษร")
+        if not re.match(r"^[a-z0-9.]+$", value):
+            raise ValueError("Facebook อนุญาตเฉพาะ a-z, 0-9 และจุด (.) เท่านั้น ห้ามมีช่องว่าง")
+        if ".." in value or value.startswith(".") or value.endswith("."):
+            raise ValueError("Facebook ห้ามใช้จุดติดกัน หรือจุดนำหน้า/ท้าย")
         return value
 
     if len(value) < _CONTACT_VALUE_MIN_LENGTH:
@@ -280,7 +315,7 @@ class WebhookCreate(BaseModel):
 
 
 class WebhookResponse(BaseModel):
-    id: int
+    id: str
     url: str
     is_active: bool
     is_healthy: bool
@@ -533,6 +568,7 @@ class UserMeResponse(BaseModel):
 
 class UserContactCreate(BaseModel):
     channel_type: str = Field(..., description=f"ต้องเป็นหนึ่งใน {sorted(_USER_CONTACT_CHANNEL_TYPES)}")
+    label: Optional[str] = Field(default=None, max_length=50)
     value: str = Field(..., min_length=1, max_length=300)
 
     @field_validator("channel_type")
@@ -546,11 +582,29 @@ class UserContactCreate(BaseModel):
     @model_validator(mode="after")
     def normalize_value(self):
         self.value = normalize_user_contact_value(self.channel_type, self.value)
+        if self.channel_type == "generic":
+            self.label = (self.label or "").strip()
+            if not self.label:
+                raise ValueError("ช่องทาง 'อื่นๆ' ต้องระบุชื่อช่องทาง (label) ด้วย")
+            if _NO_EMOJI_RE.search(self.label):
+                raise ValueError("ชื่อช่องทางไม่อนุญาตให้ใช้ Emoji หรืออักขระพิเศษ")
+        else:
+            self.label = None
         return self
 
 
 class UserContactUpdate(BaseModel):
+    label: Optional[str] = Field(default=None, max_length=50)
     value: str = Field(..., min_length=1, max_length=300)
+
+    @field_validator("label")
+    @classmethod
+    def strip_label(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            v = v.strip()
+            if _NO_EMOJI_RE.search(v):
+                raise ValueError("ชื่อช่องทางไม่อนุญาตให้ใช้ Emoji หรืออักขระพิเศษ")
+        return v
 
     @field_validator("value")
     @classmethod
@@ -564,6 +618,7 @@ class UserContactUpdate(BaseModel):
 class UserContactResponse(BaseModel):
     id: int
     channel_type: str
+    label: Optional[str] = None
     value: str
     created_at: datetime
     updated_at: Optional[datetime] = None

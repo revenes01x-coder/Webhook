@@ -72,7 +72,7 @@ class Camera(Base):
     id = Column(String, primary_key=True, index=True)
     owner_user_id = Column(String(32), ForeignKey("users.id"), nullable=False, index=True)
     rtsp_url = Column(String, nullable=False, unique=True)
-    webhook_endpoint_id = Column(Integer, ForeignKey("webhook_endpoints.id"), nullable=False, index=True)
+    webhook_endpoint_id = Column(String(32), ForeignKey("webhook_endpoints.id"), nullable=False, index=True)
     is_active = Column(Boolean, default=False, nullable=False)
     verification_status = Column(String, default="pending", nullable=False, index=True)
     verify_attempt_count = Column(Integer, default=0, nullable=False)
@@ -93,7 +93,7 @@ class RateLimit(Base):
 
 class WebhookEndpoint(Base):
     __tablename__ = "webhook_endpoints"
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(String(32), primary_key=True, index=True, default=generate_uuid)
     user_id = Column(String(32), ForeignKey("users.id"))
     url = Column(String, nullable=False, unique=True)
     is_active = Column(Boolean, default=True)
@@ -117,7 +117,7 @@ class WebhookEvent(Base):
     camera_id = Column(String, ForeignKey("cameras.id"), nullable=True, index=True)
 
     # อ้างอิง endpoint ที่ event นี้ถูกส่งไป — ใช้ทำ circuit breaker (is_healthy) ต่อ endpoint
-    webhook_endpoint_id = Column(Integer, ForeignKey("webhook_endpoints.id"), nullable=True, index=True)
+    webhook_endpoint_id = Column(String(32), ForeignKey("webhook_endpoints.id"), nullable=True, index=True)
 
     target_url = Column(String, nullable=False)
     payload = Column(JSON, nullable=False)
@@ -206,6 +206,7 @@ class UserContact(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String(32), ForeignKey("users.id"), nullable=False, index=True)
     channel_type = Column(String(20), nullable=False)
+    label = Column(String(50), nullable=True)
     value = Column(String(300), nullable=False)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())

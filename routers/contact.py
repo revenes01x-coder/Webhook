@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,6 +40,7 @@ async def list_contact_channels(
 @router.post("/admin/contact-channels", response_model=schemas.ContactChannelResponse)
 async def create_contact_channel(
     payload: schemas.ContactChannelCreate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
@@ -66,6 +67,7 @@ async def create_contact_channel(
         target_type="contact_channel",
         target_id=new_channel.id,
         detail={"label": new_channel.label, "value": new_channel.value, "icon": new_channel.icon},
+        ip_address=request.client.host,
     )
 
     await db.commit()
@@ -77,6 +79,7 @@ async def create_contact_channel(
 async def update_contact_channel(
     channel_id: int,
     payload: schemas.ContactChannelUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
@@ -115,6 +118,7 @@ async def update_contact_channel(
         target_type="contact_channel",
         target_id=channel.id,
         detail=updates,
+        ip_address=request.client.host,
     )
 
     await db.commit()
@@ -125,6 +129,7 @@ async def update_contact_channel(
 @router.delete("/admin/contact-channels/{channel_id}")
 async def delete_contact_channel(
     channel_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
@@ -135,7 +140,8 @@ async def delete_contact_channel(
         action="contact_channel.delete",
         target_type="contact_channel",
         target_id=channel.id,
-        detail={"label": channel.label, "value": channel.value},
+        detail={"label": channel.label, "value": channel.value, "icon": channel.icon},
+        ip_address=request.client.host,
     )
 
     await db.delete(channel)
@@ -151,6 +157,7 @@ async def delete_contact_channel(
 async def reorder_contact_channel(
     channel_id: int,
     payload: schemas.ContactChannelReorderRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
@@ -180,6 +187,7 @@ async def reorder_contact_channel(
             target_type="contact_channel",
             target_id=channel.id,
             detail={"direction": payload.direction, "swapped_with": neighbor.id},
+            ip_address=request.client.host,
         )
 
         await db.commit()
