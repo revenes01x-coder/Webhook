@@ -58,6 +58,36 @@ async def submit_access_request(
     await db.refresh(new_request)
     return new_request
 
+@router.put("/update-pending", response_model=schemas.AccessRequestResponse)
+async def update_pending_request(
+    payload: schemas.AccessRequestCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(require_terms_accepted),
+):
+    existing_pending_result = await db.execute(
+        select(models.AccessRequest).filter(
+            models.AccessRequest.user_id == current_user.id,
+            models.AccessRequest.status == "pending",
+        )
+    )
+    existing_pending = existing_pending_result.scalar_one_or_none()
+    
+    if not existing_pending:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="ไม่พบคำขอที่กำลังรอการอนุมัติ (หรือคำขอนี้ถูกอนุมัติ/ปฏิเสธไปแล้ว)",
+        )
+
+    existing_pending.organization_name = payload.organization_name
+    existing_pending.contact_email = payload.contact_email
+    existing_pending.use_case = payload.use_case
+    existing_pending.contact_phone = payload.contact_phone
+    existing_pending.contact_name = payload.contact_name
+
+    await db.commit()
+    await db.refresh(existing_pending)
+    return existing_pending
+
 @router.get("/my-status", response_model=schemas.PaginatedResponse[schemas.AccessRequestResponse])
 async def my_access_requests(
     page_params: PageParams = Depends(),

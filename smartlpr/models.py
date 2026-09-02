@@ -23,6 +23,12 @@ class User(Base):
     full_name = Column(String, nullable=True)
     phone = Column(String, nullable=True)
 
+    # [Email Change]: เก็บอีเมลใหม่ชั่วคราวระหว่างรอ user ยืนยัน OTP — เมื่อ OTP ผ่านแล้วค่านี้จะถูกย้ายไปที่ email
+    # และ field นี้จะถูก clear เป็น NULL ทันที (ไม่เก็บค้างไว้) กันสับสนถ้า flow ไม่สมบูรณ์
+    pending_email = Column(String, nullable=True)
+    # วันเวลาที่เปลี่ยนอีเมลล่าสุด — ใช้คำนวณ Cooldown 7 วัน (NULL = ยังไม่เคยเปลี่ยน)
+    email_changed_at = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

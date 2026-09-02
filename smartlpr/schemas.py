@@ -1,9 +1,18 @@
 import re
+import dns.resolver
+import dns.exception
 from pydantic import BaseModel, EmailStr, HttpUrl, Field, field_validator, model_validator
 from datetime import datetime
 from typing import Optional, Literal, List
 
 from smartlpr.pagination import PaginatedResponse  # re-export ให้เรียกผ่าน schemas.PaginatedResponse ได้เหมือนโมเดลอื่น
+
+def has_mx_record(domain: str) -> bool:
+    try:
+        answers = dns.resolver.resolve(domain, "MX")
+        return len(answers) > 0
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.NoNameservers, dns.exception.Timeout):
+        return False
 
 _OTP_RE = re.compile(r"^\d{6}$")
 
@@ -169,7 +178,14 @@ class UserCreate(BaseModel):
     def validate_email(cls, v: str) -> str:
         if not v.isascii():
             raise ValueError("อีเมลต้องเป็นภาษาอังกฤษ (a-z, A-Z, 0-9 และสัญลักษณ์มาตรฐาน) เท่านั้น")
-        return v.strip().lower()
+        
+        email = v.strip().lower()
+        domain = email.split("@")[-1] if "@" in email else ""
+        
+        if domain and not has_mx_record(domain):
+            raise ValueError("อีเมลโดเมนนี้ไม่มีอยู่จริง หรือไม่มีระบบรับอีเมล (เช่น พิมพ์ผิด)")
+            
+        return email
 
     @field_validator("password")
     @classmethod
@@ -198,6 +214,43 @@ class UsernameUpdateRequest(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+
+
+# ---- สำหรับ Email Change (flow: request -> OTP ส่งไปอีเมลใหม่ -> verify -> เปลี่ยนอีเมล + logout) ----
+class EmailChangeRequest(BaseModel):
+    """ใช้กับ POST /auth/change-email/request — user ขอเปลี่ยนอีเมล ต้องยืนยันด้วยรหัสผ่านปัจจุบัน
+    และระบุอีเมลใหม่ที่ต้องการ ระบบจะส่ง OTP ไปยืนยันที่อีเมลใหม่ก่อนจึงจะเปลี่ยนได้จริง"""
+    password: str = Field(..., min_length=1, max_length=PASSWORD_INPUT_MAX_CHARS)
+    new_email: EmailStr
+
+    @field_validator("password")
+    @classmethod
+    def strip_password(cls, v: str) -> str:
+        return v.strip()
+
+    @field_validator("new_email")
+    @classmethod
+    def validate_new_email(cls, v: str) -> str:
+        if not v.isascii():
+            raise ValueError("อีเมลต้องเป็นภาษาอังกฤษ (a-z, A-Z, 0-9 และสัญลักษณ์มาตรฐาน) เท่านั้น")
+        email = v.strip().lower()
+        domain = email.split("@")[-1] if "@" in email else ""
+        if domain and not has_mx_record(domain):
+            raise ValueError("อีเมลโดเมนนี้ไม่มีอยู่จริง หรือไม่มีระบบรับอีเมล (เช่น พิมพ์ผิด)")
+        return email
+
+
+class EmailChangeVerifyRequest(BaseModel):
+    """ใช้กับ POST /auth/change-email/verify — user ยืนยัน OTP ที่ได้รับจากอีเมลใหม่"""
+    otp: str
+
+    @field_validator("otp")
+    @classmethod
+    def validate_otp_format(cls, v: str) -> str:
+        v = v.strip()
+        if not _OTP_RE.match(v):
+            raise ValueError("OTP ต้องเป็นตัวเลข 6 หลัก")
+        return v
 
 
 # ---- สำหรับ OTP verification ----
@@ -235,7 +288,16 @@ class ForgotPasswordRequest(BaseModel):
     @field_validator("email")
     @classmethod
     def normalize_email(cls, v: str) -> str:
-        return v.strip().lower()
+        if not v.isascii():
+            raise ValueError("อีเมลต้องเป็นภาษาอังกฤษ (a-z, A-Z, 0-9 และสัญลักษณ์มาตรฐาน) เท่านั้น")
+        
+        email = v.strip().lower()
+        domain = email.split("@")[-1] if "@" in email else ""
+        
+        if domain and not has_mx_record(domain):
+            raise ValueError("อีเมลโดเมนนี้ไม่มีอยู่จริง หรือไม่มีระบบรับอีเมล (เช่น พิมพ์ผิด)")
+            
+        return email
 
 
 class VerifyResetOtpRequest(BaseModel):
@@ -382,18 +444,56 @@ class AccessRequestCreate(BaseModel):
     contact_phone: str = Field(..., min_length=1, max_length=30)
     contact_name: str = Field(..., min_length=1, max_length=200)
 
-    @field_validator("organization_name", "use_case", "contact_phone", "contact_name")
+    @field_validator("use_case")
     @classmethod
-    def strip_and_require_nonblank(cls, v: str) -> str:
+    def validate_use_case(cls, v: str) -> str:
         v = v.strip()
         if not v:
             raise ValueError("ห้ามเว้นว่าง")
         return v
 
+    @field_validator("organization_name")
+    @classmethod
+    def validate_organization_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("ห้ามเว้นว่าง")
+        if _NO_EMOJI_RE.search(v):
+            raise ValueError("ชื่อองค์กรไม่อนุญาตให้ใช้ Emoji หรืออักขระพิเศษ")
+        return v
+
+    @field_validator("contact_phone")
+    @classmethod
+    def validate_contact_phone(cls, v: str) -> str:
+        digits = re.sub(r"[^0-9]", "", str(v))
+        if not _THAI_MOBILE_RE.match(digits):
+            raise ValueError("เบอร์โทรต้องเป็นเบอร์มือถือไทย 10 หลัก ขึ้นต้นด้วย 06, 08 หรือ 09 เท่านั้น")
+        return digits
+
+    @field_validator("contact_name")
+    @classmethod
+    def validate_contact_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("ห้ามเว้นว่าง")
+        # Allow only Thai, English, and space
+        if not re.match(r"^[a-zA-Zก-๙\s]+$", v):
+            raise ValueError("ชื่อผู้ติดต่อต้องเป็นภาษาไทยหรือภาษาอังกฤษเท่านั้น (ห้ามมีตัวเลขหรืออักขระพิเศษ)")
+        return v
+
     @field_validator("contact_email")
     @classmethod
     def normalize_email(cls, v: str) -> str:
-        return v.strip().lower()
+        if not v.isascii():
+            raise ValueError("อีเมลต้องเป็นภาษาอังกฤษ (a-z, A-Z, 0-9 และสัญลักษณ์มาตรฐาน) เท่านั้น")
+        
+        email = v.strip().lower()
+        domain = email.split("@")[-1] if "@" in email else ""
+        
+        if domain and not has_mx_record(domain):
+            raise ValueError("อีเมลโดเมนนี้ไม่มีอยู่จริง หรือไม่มีระบบรับอีเมล (เช่น พิมพ์ผิด)")
+            
+        return email
 
 
 class AccessRequestResponse(BaseModel):

@@ -3,7 +3,7 @@ import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Response, Cookie
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Response, Cookie, BackgroundTasks
 from fastapi.security import OAuth2PasswordRequestForm
 from jose import jwt, JWTError
 from sqlalchemy import select, update
@@ -31,7 +31,13 @@ from services.rate_limiter import (
     check_and_record,
 )
 from services.token import generate_otp, hash_otp, verify_otp, generate_refresh_token, hash_refresh_token
-from services.email_service import (send_otp_email, send_password_reset_otp_email,send_password_changed_email,)
+from services.email_service import (
+    send_otp_email,
+    send_password_reset_otp_email,
+    send_password_changed_email,
+    send_email_change_otp_email,
+    send_email_changed_notification_email,
+)
 from services.audit_log import log_admin_action
 from smartlpr.config import (
     OTP_EXPIRE_MINUTES,
@@ -48,6 +54,7 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 REGISTER_PURPOSE = "register"
 PASSWORD_RESET_PURPOSE = "password_reset"
+CHANGE_EMAIL_PURPOSE = "change_email"
 
 REFRESH_TOKEN_COOKIE_NAME = "refresh_token"
 
@@ -62,8 +69,8 @@ REGISTER_LOCKOUT_MINUTES = 5
 RESET_PASSWORD_LOCKOUT_LIMIT = 5
 RESET_PASSWORD_LOCKOUT_MINUTES = 5
 
-FORGOT_PASSWORD_IP_LOCKOUT_LIMIT = 10
-FORGOT_PASSWORD_IP_LOCKOUT_MINUTES = 15
+FORGOT_PASSWORD_IP_LOCKOUT_LIMIT = 5
+FORGOT_PASSWORD_IP_LOCKOUT_MINUTES = 30
 
 # [Change Password]: ต่างจาก RESET_PASSWORD_* ตรงที่ flow นี้ user login อยู่แล้ว (ไม่ผ่าน OTP)
 # คีย์ lockout ผูกกับ user.id ตรงๆ (ไม่ผูก IP เหมือน reset-password ที่ยังไม่ login) กันคนเดา
@@ -73,6 +80,12 @@ CHANGE_PASSWORD_LOCKOUT_MINUTES = 15
 
 USERNAME_CHANGE_LOCKOUT_LIMIT = 1
 USERNAME_CHANGE_LOCKOUT_MINUTES = 7 * 24 * 60 
+
+# [Change Email]: Cooldown 7 วันเช่นเดียวกับ username — อีเมลคือ "ตัวตนหลัก" ของบัญชี
+# จำกัดถี่กว่านี้ไม่ได้ประโยชน์ และอาจเป็นปัญหาถ้า user จำเป็นต้องเปลี่ยนจริงๆ
+EMAIL_CHANGE_LOCKOUT_LIMIT = 1
+EMAIL_CHANGE_LOCKOUT_MINUTES = 7 * 24 * 60
+
 
 async def _resolve_actor_id_for_logout(token: str, db: AsyncSession) -> str | None:
     """ถอด access token แบบ soft-decode (ไม่ raise แม้ decode ไม่ผ่าน/หมดอายุไปแล้วพอดี) เพื่อหา
@@ -162,7 +175,7 @@ async def _revoke_all_sessions(db: AsyncSession, user_id: str) -> None:
         await _revoke_token_family(db, family_id)
 
 
-async def _create_and_send_otp(db: AsyncSession, user: models.User, purpose: str = REGISTER_PURPOSE) -> models.OtpVerification:
+async def _create_and_send_otp(db: AsyncSession, user: models.User, purpose: str = REGISTER_PURPOSE, background_tasks: BackgroundTasks = None) -> models.OtpVerification:
     """สร้าง/เขียนทับ OTP ของ (user, purpose) นี้ แล้วส่งอีเมล
     คืน otp_record กลับไปให้ caller เอา expires_at ไปส่งต่อให้ frontend นับถอยหลังได้แม่นยำ
     (ใช้เวลาจริงจาก server ไม่ใช่ค่าคงที่ฝั่ง client)
@@ -200,10 +213,19 @@ async def _create_and_send_otp(db: AsyncSession, user: models.User, purpose: str
     await db.commit()
     await db.refresh(otp_record)  # เอา id/expires_at ที่ commit แล้วกลับมาแน่นอน
 
-    if purpose == PASSWORD_RESET_PURPOSE:
-        await asyncio.to_thread(send_password_reset_otp_email, user.email, otp_plain)
+    def send_appropriate_email():
+        if purpose == PASSWORD_RESET_PURPOSE:
+            send_password_reset_otp_email(user.email, otp_plain)
+        elif purpose == CHANGE_EMAIL_PURPOSE:
+            from services.email_service import send_email_change_otp_email
+            send_email_change_otp_email(user.email, otp_plain)
+        else:
+            send_otp_email(user.email, otp_plain)
+
+    if background_tasks:
+        background_tasks.add_task(send_appropriate_email)
     else:
-        await asyncio.to_thread(send_otp_email, user.email, otp_plain)
+        await asyncio.to_thread(send_appropriate_email)
 
     return otp_record
 
@@ -527,6 +549,7 @@ async def refresh_access_token(
 async def forgot_password(
     payload: schemas.ForgotPasswordRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     client_ip = request.client.host
@@ -540,13 +563,22 @@ async def forgot_password(
 
     result = await db.execute(select(models.User).filter(models.User.email == payload.email))
     user = result.scalar_one_or_none()
-    generic_message = {"message": "หากอีเมลนี้อยู่ในระบบ เราได้ส่ง OTP สำหรับตั้งรหัสผ่านใหม่ไปให้แล้ว"}
+    
+    now = datetime.now(timezone.utc)
+    dummy_expires_at = now + timedelta(minutes=OTP_EXPIRE_MINUTES)
+    
+    # ข้อความมาตรฐาน ตอบเหมือนกัน 100% ทั้งเจอและไม่เจออีเมล ป้องกัน Email Enumeration
+    generic_response = {
+        "message": "หากอีเมลนี้ตรงกับบัญชีที่มีอยู่ในระบบ เราจะส่งรหัส OTP ไปให้โดยเร็วที่สุด กรุณาตรวจสอบกล่องข้อความหลักและกล่องสแปมด้วย",
+        "otp_expires_at": dummy_expires_at,
+        "otp_expires_in_seconds": OTP_EXPIRE_MINUTES * 60,
+    }
 
-    if not user:
-        return generic_message
-
-    if not user.is_verified:
-        return generic_message
+    if not user or not user.is_verified:
+        # หน่วงเวลาเล็กน้อยเพื่อป้องกัน Timing Attack (แฮกเกอร์จับเวลาเทียบกับเคสที่เจอ user จริง)
+        # เนื่องจากเราจะเปลี่ยนไปใช้ BackgroundTasks ในการส่งเมล เวลาที่ใช้จึงสั้นมาก
+        await asyncio.sleep(0.3)
+        return generic_response
 
     lockout_key = f"forgot_password_{payload.email}"
 
@@ -561,7 +593,7 @@ async def forgot_password(
     )
     latest_otp = latest_otp_result.scalar_one_or_none()
     if latest_otp:
-        elapsed = (datetime.now(timezone.utc) - latest_otp.created_at).total_seconds()
+        elapsed = (now - latest_otp.created_at).total_seconds()
         if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
             wait_more = int(OTP_RESEND_COOLDOWN_SECONDS - elapsed)
             raise HTTPException(
@@ -573,15 +605,15 @@ async def forgot_password(
             )
 
     try:
-        otp_record = await _create_and_send_otp(db, user, purpose=PASSWORD_RESET_PURPOSE)
+        # สร้าง OTP (ในฐานข้อมูล)
+        otp_record = await _create_and_send_otp(db, user, purpose=PASSWORD_RESET_PURPOSE, background_tasks=background_tasks)
     except RuntimeError as e:
+        # แม้จะพังในขั้นตอนนี้ก็ควรปิดบังไม่ให้แฮกเกอร์รู้ แต่เนื่องจากเป็น error ภายใน ปล่อยให้มัน throw ปกติ
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
 
-    return {
-        **generic_message,
-        "otp_expires_at": otp_record.expires_at,
-        "otp_expires_in_seconds": OTP_EXPIRE_MINUTES * 60,
-    }
+    # ปรับปรุง response ของเคสสำเร็จให้ตรงกับ generic
+    generic_response["otp_expires_at"] = otp_record.expires_at
+    return generic_response
 
 
 @router.post("/verify-reset-otp", response_model=schemas.ResetTokenResponse)
@@ -865,3 +897,197 @@ async def update_username(
         phone=current_user.phone,
         created_at=current_user.created_at,
     )
+
+
+# ============================================================
+# CHANGE EMAIL — flow 2 ขั้นตอน:
+#   1) POST /auth/change-email/request  → ยืนยันรหัสผ่าน + ส่ง OTP ไปอีเมลใหม่
+#   2) POST /auth/change-email/verify   → ยืนยัน OTP → เปลี่ยนอีเมล + logout ทุกอุปกรณ์
+# ============================================================
+
+@router.post("/change-email/request")
+async def change_email_request(
+    payload: schemas.EmailChangeRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """ขั้นตอนที่ 1: ตรวจสอบรหัสผ่านปัจจุบัน, ตรวจ cooldown 7 วัน, ตรวจอีเมลซ้ำ
+    แล้วส่ง OTP ไปยังอีเมลใหม่เพื่อรอยืนยัน — อีเมลยังไม่ถูกเปลี่ยน ณ จุดนี้"""
+    # 1. ตรวจรหัสผ่านปัจจุบัน
+    if not verify_password(payload.password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="รหัสผ่านปัจจุบันไม่ถูกต้อง",
+        )
+
+    # 2. ตรวจว่าอีเมลใหม่ไม่ซ้ำกับของเดิม
+    if payload.new_email == current_user.email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="อีเมลใหม่ต้องไม่ซ้ำกับอีเมลปัจจุบัน",
+        )
+
+    # 3. ตรวจ cooldown 7 วัน (email_changed_at — ไม่นับ request นี้ในตาราง rate_limits
+    #    เพราะ user ยังไม่ได้เปลี่ยนอีเมลจริงๆ จะนับก็ต่อเมื่อ verify สำเร็จแล้วเท่านั้น)
+    if current_user.email_changed_at is not None:
+        cooldown_until = current_user.email_changed_at + timedelta(minutes=EMAIL_CHANGE_LOCKOUT_MINUTES)
+        now = datetime.now(timezone.utc)
+        if now < cooldown_until:
+            remaining_seconds = int((cooldown_until - now).total_seconds())
+            remaining_days = remaining_seconds // 86400
+            remaining_hours = (remaining_seconds % 86400) // 3600
+            detail_msg = f"เพิ่งเปลี่ยนอีเมลไปแล้ว กรุณารออีก {remaining_days} วัน {remaining_hours} ชั่วโมงก่อนเปลี่ยนอีกครั้ง"
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={"message": detail_msg, "retry_after_seconds": remaining_seconds},
+            )
+
+    # 4. ตรวจอีเมลใหม่ไม่ซ้ำกับ user อื่นในระบบ
+    existing_result = await db.execute(
+        select(models.User).filter(models.User.email == payload.new_email)
+    )
+    if existing_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="อีเมลนี้ถูกใช้งานโดยบัญชีอื่นในระบบแล้ว",
+        )
+
+    # 5. เก็บ pending_email ชั่วคราว แล้วส่ง OTP ไปยังอีเมลใหม่
+    current_user.pending_email = payload.new_email
+    await db.commit()
+
+    # ใช้ _create_and_send_otp แต่ส่งไปอีเมลใหม่ (ไม่ใช่อีเมลปัจจุบัน)
+    # จึงต้อง override email ชั่วคราว แล้ว restore กลับหลัง commit
+    # เพื่อกัน side-effect กับฟังก์ชันอื่นที่ใช้ current_user.email
+    original_email = current_user.email
+    current_user.email = payload.new_email
+    try:
+        otp_record = await _create_and_send_otp(db, current_user, purpose=CHANGE_EMAIL_PURPOSE, background_tasks=background_tasks)
+    finally:
+        current_user.email = original_email
+
+    return {
+        "message": "ส่ง OTP ไปยังอีเมลใหม่ของท่านแล้ว กรุณาตรวจสอบกล่องจดหมาย",
+        "otp_expires_at": otp_record.expires_at,
+        "otp_expires_in_seconds": OTP_EXPIRE_MINUTES * 60,
+    }
+
+
+@router.post("/change-email/verify")
+async def change_email_verify(
+    payload: schemas.EmailChangeVerifyRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """ขั้นตอนที่ 2: ยืนยัน OTP ที่ส่งไปอีเมลใหม่ — ถ้าถูกต้องจะเปลี่ยนอีเมลจริง
+    แล้ว revoke ทุก refresh token (บังคับ login ใหม่ทุกอุปกรณ์)"""
+    # ตรวจว่ามี pending_email รออยู่
+    if not current_user.pending_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ไม่พบคำขอเปลี่ยนอีเมลที่รอยืนยัน กรุณาเริ่มต้นใหม่",
+        )
+
+    # ค้นหา OTP record (purpose=change_email) — ใช้ user_id ซึ่งไม่เปลี่ยนตาม email
+    otp_result = await db.execute(
+        select(models.OtpVerification)
+        .filter(
+            models.OtpVerification.user_id == current_user.id,
+            models.OtpVerification.purpose == CHANGE_EMAIL_PURPOSE,
+        )
+        .with_for_update()
+    )
+    otp_record = otp_result.scalar_one_or_none()
+
+    if not otp_record or otp_record.is_used:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ไม่พบ OTP ที่ใช้งานได้ กรุณาขอ OTP ใหม่",
+        )
+
+    now = datetime.now(timezone.utc)
+    if now > otp_record.expires_at:
+        otp_record.is_used = True
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OTP หมดอายุแล้ว กรุณาขอ OTP ใหม่",
+        )
+
+    if otp_record.attempt_count >= OTP_MAX_ATTEMPTS:
+        otp_record.is_used = True
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="กรอก OTP ผิดเกินจำนวนครั้งที่กำหนด กรุณาขอ OTP ใหม่",
+        )
+
+    if not verify_otp(payload.otp, otp_record.otp_hash):
+        otp_record.attempt_count += 1
+        remaining = OTP_MAX_ATTEMPTS - otp_record.attempt_count
+        if remaining <= 0:
+            otp_record.is_used = True
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"OTP ไม่ถูกต้อง (เหลือโอกาสกรอกอีก {max(remaining, 0)} ครั้ง)",
+        )
+
+    # OTP ถูกต้อง — double-check อีเมลใหม่ไม่ซ้ำกับคนอื่น (race condition check)
+    new_email = current_user.pending_email
+    conflict_result = await db.execute(
+        select(models.User).filter(
+            models.User.email == new_email,
+            models.User.id != current_user.id,
+        )
+    )
+    if conflict_result.scalar_one_or_none():
+        current_user.pending_email = None
+        otp_record.is_used = True
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="อีเมลนี้ถูกใช้งานโดยบัญชีอื่นไปแล้ว กรุณาเริ่มต้นใหม่ด้วยอีเมลอื่น",
+        )
+
+    old_email = current_user.email
+
+    # เปลี่ยนอีเมลจริง
+    current_user.email = new_email
+    current_user.pending_email = None
+    current_user.email_changed_at = now
+
+    # ลบ OTP record ออก
+    await db.delete(otp_record)
+
+    log_admin_action(
+        db, current_user.id,
+        action="account.email_changed",
+        target_type="user",
+        target_id=current_user.id,
+        detail={"old_email": old_email, "new_email": new_email},
+        ip_address=request.client.host,
+        actor_type="user",
+    )
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="อีเมลนี้ถูกใช้งานโดยบัญชีอื่นไปแล้ว",
+        )
+
+    # Revoke ทุก refresh token → บังคับ login ใหม่ทุกอุปกรณ์
+    await _revoke_all_sessions(db, current_user.id)
+    _clear_refresh_cookie(response)
+
+    # ส่งอีเมลแจ้งเตือนทั้งอีเมลเก่า (security notification) แบบ non-blocking
+    asyncio.create_task(asyncio.to_thread(send_email_changed_notification_email, old_email, new_email))
+
+    return {"message": "เปลี่ยนอีเมลสำเร็จ กรุณาเข้าสู่ระบบใหม่ด้วยอีเมลใหม่"}
