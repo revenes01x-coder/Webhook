@@ -66,7 +66,7 @@ PADDING          = 10
 COOLDOWN_SEC     = 5 
 RECONNECT_SEC    = 3   # วินาทีที่รอก่อน reconnect กล้อง
 OCR_MIN_CONFIDENCE = 0.10
-PLATE_DEDUP_WINDOW_SEC = 60
+PLATE_DEDUP_WINDOW_SEC = 180
 # ============================================================
 
 THAI_PROVINCES = [

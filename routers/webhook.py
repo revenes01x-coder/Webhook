@@ -33,7 +33,7 @@ async def add_webhook(
     if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="URL นี้ถูกใช้เป็น webhook ในระบบไปแล้ว กรุณาตรวจสอบรายการ webhook ของคุณ (GET /webhook/my) หรือใช้ URL อื่น",
+            detail="URL นี้ถูกใช้งานไปแล้ว กรุณาตรวจสอบรายการ Endpoint ด้านล่าง หรือใช้ URL อื่นแทน",
         )
 
     await verify_webhook_url(url_str)
@@ -51,7 +51,7 @@ async def add_webhook(
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="URL นี้ถูกใช้เป็น webhook ในระบบไปแล้ว กรุณาตรวจสอบรายการ webhook ของคุณ (GET /webhook/my) หรือใช้ URL อื่น",
+            detail="URL นี้ถูกใช้งานไปแล้ว กรุณาตรวจสอบรายการ Endpoint ด้านล่าง หรือใช้ URL อื่นแทน",
         )
 
     log_admin_action(

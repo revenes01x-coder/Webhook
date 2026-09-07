@@ -58,12 +58,22 @@ async def submit_access_request(
     await db.refresh(new_request)
     return new_request
 
+from services.rate_limiter import check_rate_limit
+
 @router.put("/update-pending", response_model=schemas.AccessRequestResponse)
 async def update_pending_request(
     payload: schemas.AccessRequestCreate,
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(require_terms_accepted),
 ):
+    await check_rate_limit(
+        db, 
+        f"update_pending_request_{current_user.id}", 
+        "update_pending_request", 
+        limit=5, 
+        window_minutes=30
+    )
+
     existing_pending_result = await db.execute(
         select(models.AccessRequest).filter(
             models.AccessRequest.user_id == current_user.id,

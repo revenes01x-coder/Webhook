@@ -519,10 +519,25 @@ async def refresh_access_token(
     now = datetime.now(timezone.utc)
 
     if record.is_revoked:
-        # ใบนี้เคยถูก rotate ทิ้งไปแล้ว แต่มีคนเอามาใช้ซ้ำ -> สัญญาณ token หลุด revoke ทั้งสายทันที
-        await _revoke_token_family(db, record.family_id)
-        _clear_refresh_cookie(response)
-        raise invalid_exception
+        # Grace Period: หาก Token ถูก revoke ไปไม่เกิน 15 วินาที แสดงว่าเกิดจากการเปิดหลายแท็บพร้อมกัน (Race Condition)
+        # ให้อนุโลมออก Token ใบใหม่ไปเลย โดยไม่เตะผู้ใช้ออก (ไม่ทำลายทั้งครอบครัวทิ้ง)
+        if record.revoked_at and (now - record.revoked_at).total_seconds() <= 15:
+            # ดึง User เพื่อออก Token ใหม่
+            user_result = await db.execute(select(models.User).filter(models.User.id == record.user_id))
+            user = user_result.scalar_one_or_none()
+            if not user or not user.is_verified:
+                _clear_refresh_cookie(response)
+                raise invalid_exception
+
+            new_plain_token = await _issue_refresh_token(db, user, family_id=record.family_id)
+            _set_refresh_cookie(response, new_plain_token)
+            new_access_token = create_access_token(data={"sub": user.email})
+            return {"access_token": new_access_token, "token_type": "bearer"}
+        else:
+            # ใบนี้เคยถูก rotate ทิ้งไปนานแล้ว แต่มีคนเอามาใช้ซ้ำ -> สัญญาณ token หลุด revoke ทั้งสายทันที
+            await _revoke_token_family(db, record.family_id)
+            _clear_refresh_cookie(response)
+            raise invalid_exception
 
     if now > record.expires_at:
         _clear_refresh_cookie(response)
@@ -536,6 +551,7 @@ async def refresh_access_token(
 
     # Rotate: ปิดใบเก่า ออกใบใหม่ใน family เดิม
     record.is_revoked = True
+    record.revoked_at = now
     await db.commit()
 
     new_plain_token = await _issue_refresh_token(db, user, family_id=record.family_id)
@@ -915,12 +931,25 @@ async def change_email_request(
 ):
     """ขั้นตอนที่ 1: ตรวจสอบรหัสผ่านปัจจุบัน, ตรวจ cooldown 7 วัน, ตรวจอีเมลซ้ำ
     แล้วส่ง OTP ไปยังอีเมลใหม่เพื่อรอยืนยัน — อีเมลยังไม่ถูกเปลี่ยน ณ จุดนี้"""
+    lockout_key = f"change_email_pwd_{current_user.id}"
+    await check_lockout(
+        db, lockout_key, "change_email_pwd_fail",
+        limit=CHANGE_PASSWORD_LOCKOUT_LIMIT, window_minutes=CHANGE_PASSWORD_LOCKOUT_MINUTES
+    )
+
     # 1. ตรวจรหัสผ่านปัจจุบัน
     if not verify_password(payload.password, current_user.hashed_password):
+        await record_attempt(
+            db, lockout_key, "change_email_pwd_fail",
+            limit=CHANGE_PASSWORD_LOCKOUT_LIMIT,
+            window_minutes=CHANGE_PASSWORD_LOCKOUT_MINUTES,
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="รหัสผ่านปัจจุบันไม่ถูกต้อง",
         )
+    
+    await clear_lockout(db, lockout_key, "change_email_pwd_fail")
 
     # 2. ตรวจว่าอีเมลใหม่ไม่ซ้ำกับของเดิม
     if payload.new_email == current_user.email:
