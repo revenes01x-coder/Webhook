@@ -34,6 +34,7 @@ state/
 *.pt
 *.h5
 *.onnx
+models/
 
 # ---- IDE ----
 .vscode/
@@ -48,3 +49,7 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# ---- Test / Dev scripts ----
+add_camera.py
+add_webhook.py

@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
 from sqlalchemy import select, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
@@ -72,6 +73,7 @@ async def add_webhook(
 
 @router.get("/my", response_model=schemas.PaginatedResponse[schemas.WebhookResponse])
 async def list_my_webhooks(
+    order: Optional[str] = Query(default="desc", regex="^(asc|desc)$"),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     # แค่ดูข้อมูล ไม่มีสิทธิ์สร้าง/แก้ -> ใช้ get_current_user เฉยๆ พอ ตาม dependency rule ข้อ 7
@@ -85,8 +87,12 @@ async def list_my_webhooks(
     query = (
         select(models.WebhookEndpoint)
         .filter(models.WebhookEndpoint.user_id == current_user.id)
-        .order_by(models.WebhookEndpoint.id.desc())
     )
+    if order == "asc":
+        query = query.order_by(models.WebhookEndpoint.id.asc())
+    else:
+        query = query.order_by(models.WebhookEndpoint.id.desc())
+        
     return await paginate(db, query, page_params)
 
 

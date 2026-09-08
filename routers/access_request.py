@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -100,6 +101,7 @@ async def update_pending_request(
 
 @router.get("/my-status", response_model=schemas.PaginatedResponse[schemas.AccessRequestResponse])
 async def my_access_requests(
+    order: Optional[str] = Query(default="desc", regex="^(asc|desc)$"),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
@@ -107,7 +109,10 @@ async def my_access_requests(
     query = (
         select(models.AccessRequest)
         .filter(models.AccessRequest.user_id == current_user.id)
-        .order_by(models.AccessRequest.id.desc())
     )
+    if order == "asc":
+        query = query.order_by(models.AccessRequest.id.asc())
+    else:
+        query = query.order_by(models.AccessRequest.id.desc())
 
     return await paginate(db, query, page_params)

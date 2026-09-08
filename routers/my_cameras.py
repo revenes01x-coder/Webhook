@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends
+from typing import Optional
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +13,15 @@ router = APIRouter(prefix="/my", tags=["My Cameras"])
 
 @router.get("/cameras", response_model=schemas.PaginatedResponse[schemas.MyCameraResponse])
 async def list_my_cameras(
+    camera_id: Optional[str] = Query(
+        default=None,
+        description="กรองเฉพาะกล้องที่ ID มีข้อความนี้อยู่ (partial, case-insensitive) — ไม่ระบุ = ดูทั้งหมด",
+    ),
+    order: Optional[str] = Query(
+        default="desc",
+        regex="^(asc|desc)$",
+        description="เรียงลำดับ: desc (ล่าสุด), asc (หลังสุด/เก่าสุด)",
+    ),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
@@ -21,13 +31,19 @@ async def list_my_cameras(
         .join(models.WebhookEndpoint, models.Camera.webhook_endpoint_id == models.WebhookEndpoint.id)
         .filter(models.Camera.owner_user_id == current_user.id)
     )
+    if camera_id:
+        base_query = base_query.filter(models.Camera.id.ilike(f"%{camera_id.strip()}%"))
+
+    if order == "asc":
+        base_query = base_query.order_by(models.Camera.created_at.asc(), models.Camera.id.asc())
+    else:
+        base_query = base_query.order_by(models.Camera.created_at.desc(), models.Camera.id.desc())
 
     count_query = select(func.count()).select_from(base_query.order_by(None).subquery())
     total = (await db.execute(count_query)).scalar_one()
 
     rows_result = await db.execute(
         base_query
-        .order_by(models.Camera.id.desc())
         .offset(page_params.offset)
         .limit(page_params.page_size)
     )

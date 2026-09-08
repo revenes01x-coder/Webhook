@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks, Request
-from sqlalchemy import select, func, update, delete
+from sqlalchemy import select, func, update, delete, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -109,6 +109,7 @@ async def list_access_requests(
         alias="status",
         description="กรองตามสถานะ: pending / approved / rejected (ไม่ใส่ = ดูทั้งหมด)",
     ),
+    order: Optional[str] = Query(default="desc", regex="^(asc|desc)$"),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
@@ -122,7 +123,10 @@ async def list_access_requests(
     query = select(models.AccessRequest)
     if status_filter:
         query = query.filter(models.AccessRequest.status == status_filter)
-    query = query.order_by(models.AccessRequest.id.desc())
+    if order == "asc":
+        query = query.order_by(models.AccessRequest.id.asc())
+    else:
+        query = query.order_by(models.AccessRequest.id.desc())
 
     return await paginate(db, query, page_params)
 
@@ -209,6 +213,10 @@ async def review_access_request(
 
 @router.get("/cameras", response_model=schemas.PaginatedResponse[schemas.CameraAdminResponse])
 async def list_cameras(
+    camera_id: Optional[str] = Query(
+        default=None,
+        description="กรองเฉพาะกล้องที่ ID มีข้อความนี้อยู่ (partial, case-insensitive) — ไม่ระบุ = ดูทั้งหมด",
+    ),
     owner_user_id: Optional[str] = Query(
         default=None,
         description="กรองเฉพาะกล้องของเจ้าของ (owner_user_id) คนนี้เท่านั้น (exact match) — ไม่ระบุ = ดูทั้งหมด",
@@ -216,6 +224,15 @@ async def list_cameras(
     owner_email: Optional[str] = Query(
         default=None,
         description="กรองเฉพาะกล้องของเจ้าของที่อีเมลมีข้อความนี้อยู่ (partial, case-insensitive) — ไม่ระบุ = ดูทั้งหมด",
+    ),
+    search: Optional[str] = Query(
+        default=None,
+        description="ค้นหาจาก Camera ID หรือ Owner Email (partial, case-insensitive) — ใช้ช่องเดียว",
+    ),
+    order: Optional[str] = Query(
+        default="desc",
+        regex="^(asc|desc)$",
+        description="เรียงลำดับ: desc (ล่าสุด), asc (หลังสุด/เก่าสุด)",
     ),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
@@ -231,7 +248,21 @@ async def list_cameras(
         base_query = base_query.filter(models.Camera.owner_user_id == owner_user_id)
     if owner_email:
         base_query = base_query.filter(models.User.email.ilike(f"%{owner_email}%"))
-    base_query = base_query.order_by(models.Camera.id.desc())
+    if camera_id:
+        base_query = base_query.filter(models.Camera.id.ilike(f"%{camera_id.strip()}%"))
+    if search:
+        search_term = f"%{search.strip()}%"
+        base_query = base_query.filter(
+            or_(
+                models.Camera.id.ilike(search_term),
+                models.User.email.ilike(search_term)
+            )
+        )
+
+    if order == "asc":
+        base_query = base_query.order_by(models.Camera.created_at.asc(), models.Camera.id.asc())
+    else:
+        base_query = base_query.order_by(models.Camera.created_at.desc(), models.Camera.id.desc())
 
     count_query = select(func.count()).select_from(base_query.order_by(None).subquery())
     total = (await db.execute(count_query)).scalar_one()
@@ -270,6 +301,7 @@ async def list_users(
         default=None,
         description="กรองเฉพาะ user ที่อีเมลมีข้อความนี้อยู่ (partial, case-insensitive) — ไม่ระบุ = ดูทั้งหมด",
     ),
+    order: Optional[str] = Query(default="desc", regex="^(asc|desc)$"),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
@@ -280,7 +312,10 @@ async def list_users(
         query = query.filter(models.User.id == user_id)
     if email:
         query = query.filter(models.User.email.ilike(f"%{email}%"))
-    query = query.order_by(models.User.id.desc())
+    if order == "asc":
+        query = query.order_by(models.User.id.asc())
+    else:
+        query = query.order_by(models.User.id.desc())
     return await paginate(db, query, page_params)
 
 
@@ -397,6 +432,7 @@ async def list_webhooks(
         default=None,
         description="กรองเฉพาะ webhook ของเจ้าของที่อีเมลมีข้อความนี้อยู่ (partial, case-insensitive)",
     ),
+    order: Optional[str] = Query(default="desc", regex="^(asc|desc)$"),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
@@ -410,7 +446,10 @@ async def list_webhooks(
         base_query = base_query.filter(models.WebhookEndpoint.user_id == user_id)
     if user_email:
         base_query = base_query.filter(models.User.email.ilike(f"%{user_email}%"))
-    base_query = base_query.order_by(models.WebhookEndpoint.id.desc())
+    if order == "asc":
+        base_query = base_query.order_by(models.WebhookEndpoint.id.asc())
+    else:
+        base_query = base_query.order_by(models.WebhookEndpoint.id.desc())
 
     count_query = select(func.count()).select_from(base_query.order_by(None).subquery())
     total = (await db.execute(count_query)).scalar_one()
@@ -601,6 +640,7 @@ async def list_admin_audit_log(
     action: Optional[str] = Query(default=None, description="กรองตาม action เช่น 'user.suspend', 'webhook.disable' (exact match)"),
     target_type: Optional[str] = Query(default=None, description="กรองตามประเภทเป้าหมาย: user / webhook_endpoint / access_request / camera"),
     target_id: Optional[str] = Query(default=None, description="กรองตาม target_id (exact match)"),
+    order: Optional[str] = Query(default="desc", regex="^(asc|desc)$"),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
@@ -618,7 +658,10 @@ async def list_admin_audit_log(
         base_query = base_query.filter(models.AdminAuditLog.target_type == target_type)
     if target_id:
         base_query = base_query.filter(models.AdminAuditLog.target_id == target_id)
-    base_query = base_query.order_by(models.AdminAuditLog.id.desc())
+    if order == "asc":
+        base_query = base_query.order_by(models.AdminAuditLog.id.asc())
+    else:
+        base_query = base_query.order_by(models.AdminAuditLog.id.desc())
 
     count_query = select(func.count()).select_from(base_query.order_by(None).subquery())
     total = (await db.execute(count_query)).scalar_one()
