@@ -19,7 +19,7 @@ async def list_my_cameras(
     ),
     order: Optional[str] = Query(
         default="desc",
-        regex="^(asc|desc)$",
+        pattern="^(asc|desc)$",
         description="เรียงลำดับ: desc (ล่าสุด), asc (หลังสุด/เก่าสุด)",
     ),
     page_params: PageParams = Depends(),

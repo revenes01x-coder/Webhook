@@ -1,0 +1,90 @@
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: smartlpr-db
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-smartlpr_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-smartlpr_password}
+      POSTGRES_DB: ${DB_NAME:-smartlpr_db}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-smartlpr_user} -d ${DB_NAME:-smartlpr_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - db_net     # Database ต่อแค่สะพานหลังบ้าน (ปลอดภัยสุดๆ)
+
+  backend:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: smartlpr-backend
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-smartlpr_user}:${DB_PASSWORD:-smartlpr_password}@db:5432/${DB_NAME:-smartlpr_db}
+    # [DEV MODE] เปิด Hot-Reload ให้ FastAPI สังเกตการแก้ไฟล์
+    command: ["uvicorn", "smartlpr.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      # [DEV MODE] แชร์โค้ดทั้งโฟลเดอร์เข้าไป เพื่อให้เวลาเรากดเซฟ โค้ดใน Docker อัปเดตทันที
+      - ./:/app
+      - ./captures:/app/captures
+      - ./logs:/app/logs
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - web_net    # ต่อสะพานหน้าบ้านเพื่อรับคำสั่งจาก Nginx
+      - db_net     # ต่อสะพานหลังบ้านเพื่อคุยกับ Database
+
+  frontend:
+    image: nginx:alpine
+    container_name: smartlpr-frontend
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf
+      - ./captures:/app/captures
+    depends_on:
+      - backend
+    networks:
+      - web_net    # Nginx ต่อแค่สะพานหน้าบ้าน (มองไม่เห็น Database)
+
+  camera:
+    build:
+      context: .
+      dockerfile: Dockerfile.camera
+    container_name: smartlpr-camera
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-smartlpr_user}:${DB_PASSWORD:-smartlpr_password}@db:5432/${DB_NAME:-smartlpr_db}
+    volumes:
+      - ./:/app
+      - ./captures:/app/captures
+      - ./logs:/app/logs
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - web_net
+      - db_net
+
+# ประกาศสร้างเครือข่ายจำลอง
+networks:
+  web_net:
+    driver: bridge
+  db_net:
+    driver: bridge
+
+# ประกาศ named volume สำหรับเก็บข้อมูลฐานข้อมูล (persistent)
+volumes:
+  db_data:

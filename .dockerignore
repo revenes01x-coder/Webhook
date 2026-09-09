@@ -1,0 +1,35 @@
+# Python / Environment
+venv/
+env/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+
+# Git & IDE
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Project specific
+# ไม่เอาโฟลเดอร์หน้าเว็บเข้าไปในกล่อง Python เพราะ Nginx จัดการเอง
+frontend/
+# ไม่เอารูปภาพที่เคยเทสบนเครื่องเข้าไป เพราะเราใช้ Volumes จัดการตอนรันแล้ว
+captures/
+logs/
+# ฐานข้อมูล (ถ้าใช้ SQLite) ไม่ควรแบทเข้าไปใน Image ไม่งั้นข้อมูลบนเครื่องคุณจะติดไปด้วย
+*.db
+*.sqlite3
+
+# สคริปต์เทสที่ไม่จำเป็นในคอนเทนเนอร์
+add_camera.py
+add_webhook.py

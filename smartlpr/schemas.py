@@ -396,6 +396,7 @@ class WebhookAdminResponse(WebhookResponse):
     user_id: Optional[str] = None
     disabled_reason: Optional[str] = None
     owner_email: Optional[str] = None
+    owner_is_suspended: bool = False
 
 
 class WebhookStatusUpdate(BaseModel):
@@ -603,6 +604,7 @@ class CameraAdminResponse(CameraResponse):
     owner_user_id: str
     owner_email: str
     webhook_is_active: bool
+    owner_is_suspended: bool = False
 
 class MyCameraResponse(BaseModel):
 

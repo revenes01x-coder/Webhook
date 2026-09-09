@@ -101,7 +101,7 @@ async def update_pending_request(
 
 @router.get("/my-status", response_model=schemas.PaginatedResponse[schemas.AccessRequestResponse])
 async def my_access_requests(
-    order: Optional[str] = Query(default="desc", regex="^(asc|desc)$"),
+    order: Optional[str] = Query(default="desc", pattern="^(asc|desc)$"),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     current_user: models.User = Depends(get_current_user),

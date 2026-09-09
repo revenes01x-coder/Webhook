@@ -109,7 +109,7 @@ async def list_access_requests(
         alias="status",
         description="กรองตามสถานะ: pending / approved / rejected (ไม่ใส่ = ดูทั้งหมด)",
     ),
-    order: Optional[str] = Query(default="desc", regex="^(asc|desc)$"),
+    order: Optional[str] = Query(default="desc", pattern="^(asc|desc)$"),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
@@ -231,7 +231,7 @@ async def list_cameras(
     ),
     order: Optional[str] = Query(
         default="desc",
-        regex="^(asc|desc)$",
+        pattern="^(asc|desc)$",
         description="เรียงลำดับ: desc (ล่าสุด), asc (หลังสุด/เก่าสุด)",
     ),
     page_params: PageParams = Depends(),
@@ -240,7 +240,7 @@ async def list_cameras(
 ):
 
     base_query = (
-        select(models.Camera, models.WebhookEndpoint.is_active, models.User.email)
+        select(models.Camera, models.WebhookEndpoint.is_active, models.User.email, models.User.is_suspended)
         .join(models.WebhookEndpoint, models.Camera.webhook_endpoint_id == models.WebhookEndpoint.id)
         .join(models.User, models.Camera.owner_user_id == models.User.id)
     )
@@ -282,8 +282,9 @@ async def list_cameras(
                 owner_user_id=c.owner_user_id,
                 owner_email=owner_email,
                 webhook_is_active=webhook_is_active,
+                owner_is_suspended=is_suspended,
             )
-            for c, webhook_is_active, owner_email in rows
+            for c, webhook_is_active, owner_email, is_suspended in rows
         ],
         "total": total,
         "page": page_params.page,
@@ -301,7 +302,7 @@ async def list_users(
         default=None,
         description="กรองเฉพาะ user ที่อีเมลมีข้อความนี้อยู่ (partial, case-insensitive) — ไม่ระบุ = ดูทั้งหมด",
     ),
-    order: Optional[str] = Query(default="desc", regex="^(asc|desc)$"),
+    order: Optional[str] = Query(default="desc", pattern="^(asc|desc)$"),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
@@ -432,14 +433,14 @@ async def list_webhooks(
         default=None,
         description="กรองเฉพาะ webhook ของเจ้าของที่อีเมลมีข้อความนี้อยู่ (partial, case-insensitive)",
     ),
-    order: Optional[str] = Query(default="desc", regex="^(asc|desc)$"),
+    order: Optional[str] = Query(default="desc", pattern="^(asc|desc)$"),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),
 ):
 
     base_query = (
-        select(models.WebhookEndpoint, models.User.email)
+        select(models.WebhookEndpoint, models.User.email, models.User.is_suspended)
         .outerjoin(models.User, models.WebhookEndpoint.user_id == models.User.id)
     )
     if user_id is not None:
@@ -470,8 +471,9 @@ async def list_webhooks(
                 user_id=w.user_id,
                 disabled_reason=w.disabled_reason,
                 owner_email=owner_email,
+                owner_is_suspended=is_suspended or False,
             )
-            for w, owner_email in rows
+            for w, owner_email, is_suspended in rows
         ],
         "total": total,
         "page": page_params.page,
@@ -533,7 +535,18 @@ async def set_webhook_status(
     if payload.is_active and was_unhealthy:
         background_tasks.add_task(resume_endpoint_now, endpoint.id)
 
-    return endpoint
+    return schemas.WebhookAdminResponse(
+        id=endpoint.id,
+        url=endpoint.url,
+        is_active=endpoint.is_active,
+        is_healthy=endpoint.is_healthy,
+        consecutive_dead_letters=endpoint.consecutive_dead_letters,
+        created_at=endpoint.created_at,
+        user_id=endpoint.user_id,
+        disabled_reason=endpoint.disabled_reason,
+        owner_email=owner.email if owner else None,
+        owner_is_suspended=owner.is_suspended if owner else False,
+    )
 
 
 @router.delete("/webhooks/{webhook_id}")
@@ -640,7 +653,7 @@ async def list_admin_audit_log(
     action: Optional[str] = Query(default=None, description="กรองตาม action เช่น 'user.suspend', 'webhook.disable' (exact match)"),
     target_type: Optional[str] = Query(default=None, description="กรองตามประเภทเป้าหมาย: user / webhook_endpoint / access_request / camera"),
     target_id: Optional[str] = Query(default=None, description="กรองตาม target_id (exact match)"),
-    order: Optional[str] = Query(default="desc", regex="^(asc|desc)$"),
+    order: Optional[str] = Query(default="desc", pattern="^(asc|desc)$"),
     page_params: PageParams = Depends(),
     db: AsyncSession = Depends(get_db),
     admin: models.User = Depends(require_admin),

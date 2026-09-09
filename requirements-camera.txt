@@ -1,0 +1,10 @@
+-r requirements.txt
+
+# --- AI & Computer Vision ---
+ultralytics==8.4.50
+paddleocr==3.5.0
+
+# --- GPU Models (ให้ปรับเป็นเวอร์ชัน CPU หรือลบออกถ้า Server ไม่มีการ์ดจอ) ---
+paddlepaddle-gpu==2.6.1
+torch==2.12.0.dev20260408+cu128
+torchvision==0.27.0.dev20260407+cu128
