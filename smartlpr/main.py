@@ -14,6 +14,7 @@ from worker import start_scheduler
 import os
 from smartlpr.config import CAPTURES_SAVE_DIR
 from smartlpr.security import require_capture_event_secret
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 logger = logging.getLogger("smartlpr")
 
@@ -191,3 +192,14 @@ async def receive_from_rtsp(
         return {"status": "ignored", "message": "event_id นี้เคยถูกบันทึกไปแล้ว"}
 
     return {"status": "success", "message": "เพิ่มข้อมูลลงคิวเรียบร้อย Worker จะจัดการส่งต่อให้ทันที"}
+
+
+# ---------------------------------------------------------------------------
+# [Proxy Headers]: ต้องอยู่ท้ายไฟล์นี้เสมอ — หลังจากลงทะเบียน route/middleware ทั้งหมดกับ
+# FastAPI app (exception_handler, CORSMiddleware, include_router ทุกตัว) เสร็จเรียบร้อยแล้ว
+# เท่านั้น ProxyHeadersMiddleware เป็นแค่ ASGI wrapper ธรรมดา (ไม่มี .include_router/
+# .add_middleware/.exception_handler เหมือน FastAPI) ถ้าห่อไว้เร็วเกินไปโค้ดที่เรียก method
+# พวกนี้กับ app หลังจากนั้นจะพังทันที (AttributeError) — uvicorn (smartlpr.main:app) จะหยิบ
+# ตัวแปร app ตัวสุดท้ายในไฟล์นี้ไปใช้เป็น ASGI entrypoint จริง
+# ---------------------------------------------------------------------------
+app = ProxyHeadersMiddleware(app, trusted_hosts="*")

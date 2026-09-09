@@ -2152,7 +2152,7 @@
     </div>
 
     <!-- ACCESS REQUEST -->
-    <div class="page hidden fixed-page" id="page-access">
+    <div class="page hidden" id="page-access">
       <div class="topbar">
         <div class="topbar-title">
           <button type="button" class="topbar-hamburger" onclick="openMobileNav()" title="เปิดเมนู" aria-label="เปิดเมนู">
@@ -3716,6 +3716,7 @@ function switchToPage(name, opts = {}) {
   const navItem = document.querySelector(`.nav-item[data-page="${name}"]`);
   if (navItem) navItem.classList.add('active');
   document.querySelectorAll('.page').forEach(p => p.classList.add('hidden'));
+  document.querySelectorAll('.modal-overlay').forEach(m => m.classList.add('hidden'));
   document.getElementById('page-' + name).classList.remove('hidden');
   moveAccountBar(name);
 
@@ -3844,7 +3845,7 @@ async function enterDashboard(initialPage) {
       startPage = 'admin-dashboard';
     }
   } else {
-    startPage = isKnownPage ? initialPage : 'apikey';
+    startPage = isKnownPage ? initialPage : 'access';
   }
 
   switchToPage(startPage, { replace: true });
@@ -4502,6 +4503,7 @@ function openUsernameEditModal() {
 
 function closeUsernameEditModal() {
   document.getElementById('usernameEditModal').classList.add('hidden');
+  document.getElementById('username-edit-input').value = '';
 }
 
 function openUsernameEditConfirm() {
@@ -4676,9 +4678,19 @@ async function submitEmailChangeVerify() {
    ทุกครั้งที่เข้าหน้านี้ ล้างช่องกรอก + ซ่อน alert ค้างจากรอบก่อนทิ้งให้เริ่มฟอร์มใหม่สะอาดๆ เสมอ */
 function loadChangePassword() {
   hideAlert('cp-alert'); hideAlert('cp-success');
-  document.getElementById('cp-current').value = '';
-  document.getElementById('cp-new').value = '';
-  document.getElementById('cp-confirm').value = '';
+  const page = document.getElementById('page-change-password');
+  if (page) {
+    page.querySelectorAll('input').forEach(input => {
+      input.value = '';
+      if (input.type === 'text' && input.id && input.id.includes('cp-')) {
+        input.type = 'password';
+      }
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    page.querySelectorAll('.password-toggle-btn').forEach(btn => {
+      btn.classList.remove('show');
+    });
+  }
 }
 
 /* เปลี่ยนรหัสผ่านสำเร็จ = backend revoke ทั้ง access token ปัจจุบันและ refresh token ทุกอุปกรณ์
