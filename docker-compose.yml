@@ -69,6 +69,7 @@ services:
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-smartlpr_user}:${DB_PASSWORD:-smartlpr_password}@db:5432/${DB_NAME:-smartlpr_db}
     volumes:
       - ./:/app
+      - model_data:/app/models        
       - ./captures:/app/captures
       - ./logs:/app/logs
     depends_on:
@@ -88,3 +89,4 @@ networks:
 # ประกาศ named volume สำหรับเก็บข้อมูลฐานข้อมูล (persistent)
 volumes:
   db_data:
+  model_data: 
